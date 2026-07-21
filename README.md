@@ -1,6 +1,8 @@
-# Agent Homestead
+# AI Agent Homestead
 
-A lightweight pixel-room dashboard for learning TypeScript, Vite, and Three.js while visualizing AI-agent activity.
+Give your AI agents a lovely town to live in and interact with one another.
+
+This is a lightweight pixel-room dashboard for learning TypeScript, Vite, and Three.js while visualizing AI-agent activity.
 
 ## Commands
 
