@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "name": "Agent Homestead",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/dist": true
+    }
+  }
+}
