@@ -1,9 +1,13 @@
 import * as THREE from "three";
 import "./style.css";
 import { initStudio } from "./studio";
+import {
+	avatarPresetRows,
+	avatarRowTopTrim,
+} from "./avatar-atlas";
 import avatarWalkAtlasUrl from "./assets/agent-avatar-walk-atlas-v1.png";
 import homesteadBackgroundUrl from "./assets/homestead-locations-background-v1.png";
-import mosinIdleUrl from "./assets/mosin-idle-cafe-sheet-v2.png";
+import mosinIdleUrl from "./assets/mosin-idle.png";
 import mosinWaitingUrl from "./assets/mosin-waiting-sheet-v1.png";
 import mosinWalkingUrl from "./assets/mosin-walking-atlas-v3-aligned.png";
 import mosinWorkingUrl from "./assets/mosin-working-sheet-v1.png";
@@ -94,6 +98,7 @@ interface TeamAgentRuntime {
 		startedAt: number;
 		duration: number;
 		arrivalState: AgentStatus;
+		arrivalFacingLeft: boolean;
 	} | null;
 }
 
@@ -328,12 +333,12 @@ function createAnimation({
 
 const idleAnimation = createAnimation({
 	url: mosinIdleUrl,
-	frameCount: 4,
-	columns: 4,
+	frameCount: 1,
+	columns: 1,
 	rows: 1,
-	displaySize: new THREE.Vector2(1.87, 2.8),
-	visualOffset: new THREE.Vector2(0, -0.3),
-	fps: 3,
+	displaySize: new THREE.Vector2(1.74, 2.8),
+	visualOffset: new THREE.Vector2(0, -0.05),
+	fps: 1,
 	loop: true,
 });
 
@@ -491,22 +496,16 @@ locationsRoot.add(
 	createStation(destinations.working, "WORK RANGE", "#d06e6e"),
 );
 
-const avatarPresetRows = new Map([
-	["mosin", 0],
-	["springfield", 1],
-	["scout", 2],
-	["engineer", 3],
-	["medic", 4],
-	["analyst", 5],
-	["operator", 6],
-	["commander", 7],
-]);
 const avatarWalkAtlasImage = new Image();
 let avatarWalkAtlasReady = false;
 let activeTeamVisuals: TeamVisual[] = [];
 let currentTeamDestination: DestinationStatus = "idle";
 let teamMovementFrame: number | null = null;
 const teamAgentRuntimes = new Map<string, TeamAgentRuntime>();
+// World sprites need enough source pixels for their on-canvas size. The avatar
+// picker can stay visually 32 × 32 without destructively shrinking this texture.
+const worldAvatarFrameSize = 128;
+const worldAvatarDisplaySize = 1.9;
 
 function presetName(avatar: string): string | null {
 	return avatar.startsWith("preset:") ? avatar.slice(7) : null;
@@ -581,10 +580,11 @@ function createAvatarWalkTexture(agent: TeamVisual): {
 		return { texture: presetAvatarTexture(agent), animated: false };
 	}
 
-	// Each agent receives a tiny 128 × 32 row cut from the shared source atlas.
+	// Preserve a 128 × 128 copy of each frame. Downsampling straight to 32 × 32
+	// made Springfield blocky when Three.js enlarged her in the world.
 	const canvas = document.createElement("canvas");
-	canvas.width = 128;
-	canvas.height = 32;
+	canvas.width = worldAvatarFrameSize * 4;
+	canvas.height = worldAvatarFrameSize;
 	const context = canvas.getContext("2d");
 	if (!context) {
 		return { texture: presetAvatarTexture(agent), animated: false };
@@ -592,17 +592,21 @@ function createAvatarWalkTexture(agent: TeamVisual): {
 	context.imageSmoothingEnabled = false;
 	const sourceWidth = avatarWalkAtlasImage.naturalWidth / 4;
 	const sourceHeight = avatarWalkAtlasImage.naturalHeight / 8;
+	const sourceTopTrim = avatarRowTopTrim[row] ?? 0;
+	const destinationTopTrim = Math.round(
+		(sourceTopTrim / sourceHeight) * worldAvatarFrameSize,
+	);
 	for (let frame = 0; frame < 4; frame += 1) {
 		context.drawImage(
 			avatarWalkAtlasImage,
 			frame * sourceWidth,
-			row * sourceHeight,
+			row * sourceHeight + sourceTopTrim,
 			sourceWidth,
-			sourceHeight,
-			frame * 32,
-			0,
-			32,
-			32,
+			sourceHeight - sourceTopTrim,
+			frame * worldAvatarFrameSize,
+			destinationTopTrim,
+			worldAvatarFrameSize,
+			worldAvatarFrameSize - destinationTopTrim,
 		);
 	}
 
@@ -622,11 +626,10 @@ function teamWorldPosition(
 	hasMosin: boolean,
 ): THREE.Vector3 {
 	const base = destinations[destination];
-	const direction = destination === "working" ? -1 : 1;
 	const slot = index + (hasMosin ? 1 : 0);
 	return new THREE.Vector3(
-		base.x + direction * slot * 0.72,
-		-0.93,
+		base.x + slot * 0.9,
+		-0.73,
 		2.3 + index * 0.01,
 	);
 }
@@ -644,15 +647,8 @@ function setTeamFrame(runtime: TeamAgentRuntime, frame: number): void {
 }
 
 function syncTeamMarkerVisibility(): void {
-	const hasMosin = activeTeamVisuals.some(isMosinAgent);
 	for (const runtime of teamAgentRuntimes.values()) {
-		const springfieldSharesCafe =
-			presetName(runtime.agent.avatar) === "springfield" &&
-			hasMosin &&
-			(currentStatus === "idle" || currentStatus === "done") &&
-			runtime.state === "idle" &&
-			runtime.movement === null;
-		runtime.root.visible = !springfieldSharesCafe;
+		runtime.root.visible = true;
 	}
 }
 
@@ -675,7 +671,7 @@ function animateTeamMovement(currentTime: number): void {
 		}
 		runtime.root.position.copy(movement.to);
 		runtime.state = movement.arrivalState;
-		runtime.facingLeft = false;
+		runtime.facingLeft = movement.arrivalFacingLeft;
 		runtime.movement = null;
 		setTeamFrame(runtime, runtime.state === "waiting" ? 1 : 0);
 	}
@@ -690,11 +686,13 @@ function moveTeamAgent(
 	runtime: TeamAgentRuntime,
 	target: THREE.Vector3,
 	arrivalState: AgentStatus,
+	arrivalFacingLeft: boolean,
 ): void {
 	const distance = runtime.root.position.distanceTo(target);
 	if (distance < 0.02) {
 		runtime.root.position.copy(target);
 		runtime.state = arrivalState;
+		runtime.facingLeft = arrivalFacingLeft;
 		runtime.movement = null;
 		setTeamFrame(runtime, arrivalState === "waiting" ? 1 : 0);
 		return;
@@ -707,6 +705,7 @@ function moveTeamAgent(
 		startedAt: performance.now(),
 		duration: Math.max(450, (distance / 3.4) * 1000),
 		arrivalState,
+		arrivalFacingLeft,
 	};
 	if (teamMovementFrame === null) {
 		teamMovementFrame = requestAnimationFrame(animateTeamMovement);
@@ -735,10 +734,12 @@ function routeNonMosinTeam(
 	const runtimes = [...teamAgentRuntimes.values()];
 
 	for (const [index, runtime] of runtimes.entries()) {
+		const target = teamWorldPosition(destination, index, hasMosin);
 		moveTeamAgent(
 			runtime,
-			teamWorldPosition(destination, index, hasMosin),
+			target,
 			arrivalState,
+			hasMosin && target.x > destinations[destination].x,
 		);
 	}
 	syncTeamMarkerVisibility();
@@ -770,10 +771,12 @@ function routeTeamActivity(event: ActivityEvent): boolean {
 			0,
 			runtimes.findIndex((item) => item.agent.id === runtime.agent.id),
 		);
+		const target = teamWorldPosition(destination, index, hasMosin);
 		moveTeamAgent(
 			runtime,
-			teamWorldPosition(destination, index, hasMosin),
+			target,
 			arrivalState,
+			hasMosin && target.x > destinations[destination].x,
 		);
 	} else if (runtime.movement) {
 		runtime.movement.arrivalState = event.status;
@@ -809,11 +812,14 @@ function renderTeamMarkers(agents: TeamVisual[]): void {
 			transparent: true,
 		});
 		const sprite = new THREE.Sprite(material);
-		sprite.scale.set(1.48, 1.48, 1);
+		sprite.scale.set(worldAvatarDisplaySize, worldAvatarDisplaySize, 1);
 		const root = new THREE.Group();
-		root.position.copy(
-			teamWorldPosition(currentTeamDestination, index, hasMosin),
+		const initialPosition = teamWorldPosition(
+			currentTeamDestination,
+			index,
+			hasMosin,
 		);
+		root.position.copy(initialPosition);
 		root.add(sprite);
 		teamAgentsRoot.add(root);
 		const runtime: TeamAgentRuntime = {
@@ -825,7 +831,9 @@ function renderTeamMarkers(agents: TeamVisual[]): void {
 			animated,
 			frame: 0,
 			state: currentTeamDestination,
-			facingLeft: false,
+			facingLeft:
+				hasMosin &&
+				initialPosition.x > destinations[currentTeamDestination].x,
 			movement: null,
 		};
 		teamAgentRuntimes.set(agent.id, runtime);

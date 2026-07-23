@@ -1,4 +1,10 @@
 import avatarWalkAtlasUrl from "./assets/agent-avatar-walk-atlas-v1.png";
+import {
+	avatarPresets,
+	avatarPresetRows,
+	avatarRowPosition,
+	avatarTopTrim,
+} from "./avatar-atlas";
 
 type SessionMode = "chat" | "workflow";
 type SessionPermission = "read-only" | "workspace-write";
@@ -86,20 +92,20 @@ interface StudioContext {
 	addActivity: (message: string, kind?: string) => void;
 }
 
-const avatarPresets = [
-	"mosin",
-	"springfield",
-	"scout",
-	"engineer",
-	"medic",
-	"analyst",
-	"operator",
-	"commander",
-];
-
-const avatarPresetRows = new Map(
-	avatarPresets.map((preset, row) => [preset, row]),
-);
+function setAvatarAtlasPosition(
+	element: HTMLElement,
+	row: number,
+): void {
+	element.style.setProperty("--avatar-row", String(row));
+	element.style.setProperty(
+		"--avatar-row-position",
+		avatarRowPosition(row),
+	);
+	element.style.setProperty(
+		"--avatar-top-trim",
+		avatarTopTrim(row),
+	);
+}
 
 function requireElement<T extends Element>(
 	root: ParentNode,
@@ -161,11 +167,7 @@ function createAvatar(agent: Pick<AgentProfile, "avatar" | "name">): HTMLElement
 		const avatar = document.createElement("span");
 		avatar.className = `${avatarClass(agent.avatar)} avatar-walk-sprite`;
 		avatar.style.backgroundImage = `url("${avatarWalkAtlasUrl}")`;
-		avatar.style.setProperty("--avatar-row", String(atlasRow));
-		avatar.style.setProperty(
-			"--avatar-row-position",
-			`${(atlasRow / 7) * 100}%`,
-		);
+		setAvatarAtlasPosition(avatar, atlasRow);
 		avatar.setAttribute("aria-hidden", "true");
 		return avatar;
 	}
@@ -728,11 +730,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			`preset:${preset}`,
 		)} avatar-walk-sprite is-animated`;
 		preview.style.backgroundImage = `url("${avatarWalkAtlasUrl}")`;
-		preview.style.setProperty("--avatar-row", String(row));
-		preview.style.setProperty(
-			"--avatar-row-position",
-			`${(row / 7) * 100}%`,
-		);
+		setAvatarAtlasPosition(preview, row);
 		preview.setAttribute("aria-hidden", "true");
 
 		const label = document.createElement("span");

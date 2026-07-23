@@ -738,12 +738,27 @@ label > span,
 .avatar-walk-sprite {
 	--avatar-row: 0;
 	--avatar-row-position: 0%;
+	--avatar-top-trim: 0%;
+	position: relative;
+	overflow: hidden;
 	background-position:
 		0%
 		var(--avatar-row-position);
 	background-repeat: no-repeat;
 	background-size: 400% 800%;
 	color: transparent;
+}
+
+.avatar-walk-sprite::after {
+	position: absolute;
+	z-index: 1;
+	top: 0;
+	right: 0;
+	left: 0;
+	height: var(--avatar-top-trim);
+	background: #27253a;
+	content: "";
+	pointer-events: none;
 }
 
 .avatar-walk-sprite.is-animated {
