@@ -24,7 +24,7 @@ Double-click `start-homestead.cmd`, or run:
 npm.cmd run start
 ```
 
-Open <http://127.0.0.1:4174>. The server binds only to `127.0.0.1`.
+Open <http://127.0.0.1:4174>. The server binds only to `127.0.0.1` or `localhost`.
 
 For development, run these in separate terminals:
 
@@ -46,9 +46,7 @@ Studio state is written to:
 This file contains projects, session transcripts, agent settings, workflow
 runs, and Codex thread IDs. The directory is ignored by Git.
 
-Raw API keys are never saved. For an OpenAI API agent, enter only the name of
-an environment variable such as `OPENAI_API_KEY`, then define that variable in
-the environment that starts Agent Homestead.
+For an OpenAI API agent, enter only the name of an environment variable such as `OPENAI_API_KEY`, then define that variable in the environment that starts Agent Homestead.
 
 ## Session access
 
