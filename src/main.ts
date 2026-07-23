@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import "./style.css";
 import { initStudio } from "./studio";
+import avatarWalkAtlasUrl from "./assets/agent-avatar-walk-atlas-v1.png";
 import homesteadBackgroundUrl from "./assets/homestead-locations-background-v1.png";
 import mosinIdleUrl from "./assets/mosin-idle-cafe-sheet-v2.png";
 import mosinWaitingUrl from "./assets/mosin-waiting-sheet-v1.png";
@@ -37,6 +38,9 @@ interface ActivityEvent {
 	type: "activity";
 	status: AgentStatus;
 	message: string;
+	agentId?: string | null;
+	agentName?: string;
+	stage?: string;
 }
 
 interface ConnectionEvent {
@@ -72,6 +76,25 @@ interface TeamVisual {
 	name: string;
 	avatar: string;
 	role: string;
+}
+
+interface TeamAgentRuntime {
+	agent: TeamVisual;
+	root: THREE.Group;
+	sprite: THREE.Sprite;
+	material: THREE.SpriteMaterial;
+	texture: THREE.Texture;
+	animated: boolean;
+	frame: number;
+	state: AgentStatus;
+	facingLeft: boolean;
+	movement: {
+		from: THREE.Vector3;
+		to: THREE.Vector3;
+		startedAt: number;
+		duration: number;
+		arrivalState: AgentStatus;
+	} | null;
 }
 
 type BridgeEvent =
@@ -218,6 +241,10 @@ const runDemoButton = requireElement<HTMLButtonElement>("#run-demo");
 const clearResultButton = requireElement<HTMLButtonElement>("#clear-result");
 const taskHint = requireElement<HTMLParagraphElement>("#task-hint");
 const doneBurst = requireElement<HTMLDivElement>("#done-burst");
+const worldTitle = requireElement<HTMLHeadingElement>("#world-title");
+const controlTitle = requireElement<HTMLHeadingElement>("#control-title");
+const stationControls =
+	requireElement<HTMLDivElement>(".station-controls");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#171629");
@@ -464,6 +491,34 @@ locationsRoot.add(
 	createStation(destinations.working, "WORK RANGE", "#d06e6e"),
 );
 
+const avatarPresetRows = new Map([
+	["mosin", 0],
+	["springfield", 1],
+	["scout", 2],
+	["engineer", 3],
+	["medic", 4],
+	["analyst", 5],
+	["operator", 6],
+	["commander", 7],
+]);
+const avatarWalkAtlasImage = new Image();
+let avatarWalkAtlasReady = false;
+let activeTeamVisuals: TeamVisual[] = [];
+let currentTeamDestination: DestinationStatus = "idle";
+let teamMovementFrame: number | null = null;
+const teamAgentRuntimes = new Map<string, TeamAgentRuntime>();
+
+function presetName(avatar: string): string | null {
+	return avatar.startsWith("preset:") ? avatar.slice(7) : null;
+}
+
+function isMosinAgent(agent: TeamVisual): boolean {
+	return (
+		presetName(agent.avatar) === "mosin" ||
+		agent.name.trim().toLowerCase() === "mosin"
+	);
+}
+
 function presetAvatarTexture(agent: TeamVisual): THREE.CanvasTexture {
 	const canvas = document.createElement("canvas");
 	canvas.width = 32;
@@ -513,20 +568,226 @@ function presetAvatarTexture(agent: TeamVisual): THREE.CanvasTexture {
 	return texture;
 }
 
-function teamDestination(role: string): THREE.Vector3 {
-	if (role === "builder") {
-		return new THREE.Vector3(2.65, -1.72, 1.5);
+function createAvatarWalkTexture(agent: TeamVisual): {
+	texture: THREE.Texture;
+	animated: boolean;
+} {
+	const row = avatarPresetRows.get(presetName(agent.avatar) ?? "");
+	if (
+		row === undefined ||
+		!avatarWalkAtlasReady ||
+		avatarWalkAtlasImage.naturalWidth === 0
+	) {
+		return { texture: presetAvatarTexture(agent), animated: false };
 	}
-	if (role === "tester") {
-		return new THREE.Vector3(0.65, -1.72, 1.5);
+
+	// Each agent receives a tiny 128 × 32 row cut from the shared source atlas.
+	const canvas = document.createElement("canvas");
+	canvas.width = 128;
+	canvas.height = 32;
+	const context = canvas.getContext("2d");
+	if (!context) {
+		return { texture: presetAvatarTexture(agent), animated: false };
 	}
-	if (role === "presenter") {
-		return new THREE.Vector3(-2.55, -1.72, 1.5);
+	context.imageSmoothingEnabled = false;
+	const sourceWidth = avatarWalkAtlasImage.naturalWidth / 4;
+	const sourceHeight = avatarWalkAtlasImage.naturalHeight / 8;
+	for (let frame = 0; frame < 4; frame += 1) {
+		context.drawImage(
+			avatarWalkAtlasImage,
+			frame * sourceWidth,
+			row * sourceHeight,
+			sourceWidth,
+			sourceHeight,
+			frame * 32,
+			0,
+			32,
+			32,
+		);
 	}
-	return new THREE.Vector3(-2.95, -1.72, 1.5);
+
+	const texture = new THREE.CanvasTexture(canvas);
+	texture.colorSpace = THREE.SRGBColorSpace;
+	texture.magFilter = THREE.NearestFilter;
+	texture.minFilter = THREE.NearestFilter;
+	texture.generateMipmaps = false;
+	texture.repeat.set(1 / 4, 1);
+	texture.offset.set(0, 0);
+	return { texture, animated: true };
+}
+
+function teamWorldPosition(
+	destination: DestinationStatus,
+	index: number,
+	hasMosin: boolean,
+): THREE.Vector3 {
+	const base = destinations[destination];
+	const direction = destination === "working" ? -1 : 1;
+	const slot = index + (hasMosin ? 1 : 0);
+	return new THREE.Vector3(
+		base.x + direction * slot * 0.72,
+		-0.93,
+		2.3 + index * 0.01,
+	);
+}
+
+function setTeamFrame(runtime: TeamAgentRuntime, frame: number): void {
+	runtime.frame = ((frame % 4) + 4) % 4;
+	if (!runtime.animated) {
+		return;
+	}
+	const frameWidth = 1 / 4;
+	runtime.texture.repeat.x = runtime.facingLeft ? -frameWidth : frameWidth;
+	runtime.texture.offset.x = runtime.facingLeft
+		? runtime.frame * frameWidth + frameWidth
+		: runtime.frame * frameWidth;
+}
+
+function syncTeamMarkerVisibility(): void {
+	const hasMosin = activeTeamVisuals.some(isMosinAgent);
+	for (const runtime of teamAgentRuntimes.values()) {
+		const springfieldSharesCafe =
+			presetName(runtime.agent.avatar) === "springfield" &&
+			hasMosin &&
+			(currentStatus === "idle" || currentStatus === "done") &&
+			runtime.state === "idle" &&
+			runtime.movement === null;
+		runtime.root.visible = !springfieldSharesCafe;
+	}
+}
+
+function animateTeamMovement(currentTime: number): void {
+	let stillMoving = false;
+	for (const runtime of teamAgentRuntimes.values()) {
+		const movement = runtime.movement;
+		if (!movement) {
+			continue;
+		}
+		const progress = Math.min(
+			(currentTime - movement.startedAt) / movement.duration,
+			1,
+		);
+		const eased = 1 - (1 - progress) ** 3;
+		runtime.root.position.lerpVectors(movement.from, movement.to, eased);
+		if (progress < 1) {
+			stillMoving = true;
+			continue;
+		}
+		runtime.root.position.copy(movement.to);
+		runtime.state = movement.arrivalState;
+		runtime.facingLeft = false;
+		runtime.movement = null;
+		setTeamFrame(runtime, runtime.state === "waiting" ? 1 : 0);
+	}
+	syncTeamMarkerVisibility();
+	renderScene();
+	teamMovementFrame = stillMoving
+		? requestAnimationFrame(animateTeamMovement)
+		: null;
+}
+
+function moveTeamAgent(
+	runtime: TeamAgentRuntime,
+	target: THREE.Vector3,
+	arrivalState: AgentStatus,
+): void {
+	const distance = runtime.root.position.distanceTo(target);
+	if (distance < 0.02) {
+		runtime.root.position.copy(target);
+		runtime.state = arrivalState;
+		runtime.movement = null;
+		setTeamFrame(runtime, arrivalState === "waiting" ? 1 : 0);
+		return;
+	}
+	runtime.facingLeft = target.x < runtime.root.position.x;
+	runtime.state = "walking";
+	runtime.movement = {
+		from: runtime.root.position.clone(),
+		to: target.clone(),
+		startedAt: performance.now(),
+		duration: Math.max(450, (distance / 3.4) * 1000),
+		arrivalState,
+	};
+	if (teamMovementFrame === null) {
+		teamMovementFrame = requestAnimationFrame(animateTeamMovement);
+	}
+}
+
+function destinationForStage(stage: string): {
+	destination: DestinationStatus;
+	arrivalState: AgentStatus;
+} {
+	if (stage === "plan") {
+		return { destination: "waiting", arrivalState: "waiting" };
+	}
+	if (stage === "build" || stage === "test") {
+		return { destination: "working", arrivalState: "working" };
+	}
+	return { destination: "idle", arrivalState: "idle" };
+}
+
+function routeNonMosinTeam(
+	destination: DestinationStatus,
+	arrivalState: AgentStatus,
+): void {
+	currentTeamDestination = destination;
+	const hasMosin = activeTeamVisuals.some(isMosinAgent);
+	const runtimes = [...teamAgentRuntimes.values()];
+
+	for (const [index, runtime] of runtimes.entries()) {
+		moveTeamAgent(
+			runtime,
+			teamWorldPosition(destination, index, hasMosin),
+			arrivalState,
+		);
+	}
+	syncTeamMarkerVisibility();
+}
+
+function routeTeamForStage(stage: string): void {
+	const { destination, arrivalState } = destinationForStage(stage);
+	const hasMosin = activeTeamVisuals.some(isMosinAgent);
+	if (hasMosin) {
+		travelTo(destination, arrivalState);
+	}
+	routeNonMosinTeam(destination, arrivalState);
+}
+
+function routeTeamActivity(event: ActivityEvent): boolean {
+	if (!event.agentId) {
+		return false;
+	}
+	const runtime = teamAgentRuntimes.get(event.agentId);
+	if (!runtime) {
+		return false;
+	}
+	const { destination, arrivalState } = destinationForStage(event.stage ?? "");
+	if (event.status === "walking") {
+		currentTeamDestination = destination;
+		const hasMosin = activeTeamVisuals.some(isMosinAgent);
+		const runtimes = [...teamAgentRuntimes.values()];
+		const index = Math.max(
+			0,
+			runtimes.findIndex((item) => item.agent.id === runtime.agent.id),
+		);
+		moveTeamAgent(
+			runtime,
+			teamWorldPosition(destination, index, hasMosin),
+			arrivalState,
+		);
+	} else if (runtime.movement) {
+		runtime.movement.arrivalState = event.status;
+	} else {
+		runtime.state = event.status;
+		setTeamFrame(runtime, event.status === "waiting" ? 1 : 0);
+	}
+	syncTeamMarkerVisibility();
+	renderScene();
+	return true;
 }
 
 function renderTeamMarkers(agents: TeamVisual[]): void {
+	activeTeamVisuals = agents;
 	teamAgentsRoot.traverse((object) => {
 		if (object instanceof THREE.Sprite) {
 			object.material.map?.dispose();
@@ -534,39 +795,99 @@ function renderTeamMarkers(agents: TeamVisual[]): void {
 		}
 	});
 	teamAgentsRoot.clear();
+	teamAgentRuntimes.clear();
+	const hasMosin = agents.some(isMosinAgent);
+	mosinRoot.visible = hasMosin;
+	const animatedAgents = agents
+		.filter((agent) => !isMosinAgent(agent))
+		.slice(0, 7);
 
-	// Mosin already has a full animated sprite; added agents use inexpensive 32px tokens.
-	for (const [index, agent] of agents.slice(1, 7).entries()) {
-		const fallbackTexture = presetAvatarTexture(agent);
+	for (const [index, agent] of animatedAgents.entries()) {
+		const { texture, animated } = createAvatarWalkTexture(agent);
 		const material = new THREE.SpriteMaterial({
-			map: fallbackTexture,
+			map: texture,
 			transparent: true,
 		});
-		const marker = new THREE.Sprite(material);
-		const destination = teamDestination(agent.role);
-		marker.position.copy(destination);
-		marker.position.x += index * 0.42;
-		marker.scale.set(0.58, 0.58, 1);
-		teamAgentsRoot.add(marker);
+		const sprite = new THREE.Sprite(material);
+		sprite.scale.set(1.48, 1.48, 1);
+		const root = new THREE.Group();
+		root.position.copy(
+			teamWorldPosition(currentTeamDestination, index, hasMosin),
+		);
+		root.add(sprite);
+		teamAgentsRoot.add(root);
+		const runtime: TeamAgentRuntime = {
+			agent,
+			root,
+			sprite,
+			material,
+			texture,
+			animated,
+			frame: 0,
+			state: currentTeamDestination,
+			facingLeft: false,
+			movement: null,
+		};
+		teamAgentRuntimes.set(agent.id, runtime);
+		setTeamFrame(runtime, 0);
 
 		if (agent.avatar.startsWith("data:image/")) {
-			textureLoader.load(agent.avatar, (texture) => {
-				texture.colorSpace = THREE.SRGBColorSpace;
-				texture.magFilter = THREE.NearestFilter;
-				texture.minFilter = THREE.NearestFilter;
-				texture.generateMipmaps = false;
+			textureLoader.load(agent.avatar, (uploadedTexture) => {
+				uploadedTexture.colorSpace = THREE.SRGBColorSpace;
+				uploadedTexture.magFilter = THREE.NearestFilter;
+				uploadedTexture.minFilter = THREE.NearestFilter;
+				uploadedTexture.generateMipmaps = false;
 				material.map?.dispose();
-				material.map = texture;
+				material.map = uploadedTexture;
+				runtime.texture = uploadedTexture;
+				runtime.animated = false;
 				material.needsUpdate = true;
 				renderScene();
 			});
 		}
 	}
+	syncTeamMarkerVisibility();
 	renderScene();
 }
 
+window.setInterval(() => {
+	const currentTick = Math.floor(performance.now() / 125);
+	for (const runtime of teamAgentRuntimes.values()) {
+		const shouldAnimate =
+			runtime.state === "walking" || runtime.state === "working";
+		if (shouldAnimate) {
+			setTeamFrame(runtime, currentTick % 4);
+		} else if (runtime.state === "waiting") {
+			setTeamFrame(runtime, 1);
+		} else {
+			setTeamFrame(runtime, 0);
+		}
+		runtime.sprite.position.y =
+			shouldAnimate && currentTick % 2 === 0 ? 0.025 : 0;
+	}
+	renderScene();
+}, 125);
+
+avatarWalkAtlasImage.onload = () => {
+	avatarWalkAtlasReady = true;
+	renderTeamMarkers(activeTeamVisuals);
+};
+avatarWalkAtlasImage.src = avatarWalkAtlasUrl;
+
 window.addEventListener("homestead:team", (event) => {
-	const detail = (event as CustomEvent<{ agents: TeamVisual[] }>).detail;
+	const detail = (
+		event as CustomEvent<{ agents: TeamVisual[]; leadAgentId: string }>
+	).detail;
+	const leadAgent =
+		detail.agents.find((agent) => agent.id === detail.leadAgentId) ??
+		detail.agents[0];
+	const leadName = leadAgent?.name ?? "Agent";
+	worldTitle.textContent = `${leadName}'s Workday`;
+	controlTitle.textContent = `Give ${leadName} a task`;
+	stationControls.setAttribute(
+		"aria-label",
+		`Send ${leadName} and the team to a location`,
+	);
 	renderTeamMarkers(detail.agents);
 });
 
@@ -654,6 +975,7 @@ function updateStatus(status: AgentStatus, message?: string): void {
 	activityText.textContent = message ?? statusMessages[status];
 	doneBurst.classList.toggle("is-visible", status === "done");
 	playMosinAnimation(status);
+	syncTeamMarkerVisibility();
 }
 
 function cancelMovement(): void {
@@ -822,9 +1144,25 @@ function handleBridgeEvent(event: BridgeEvent): void {
 			addActivity(event.message, event.mode);
 			break;
 		case "activity":
-			routeAgent(event.status, event.message);
+			if (!routeTeamActivity(event)) {
+				routeAgent(event.status, event.message);
+			} else {
+				statusBadge.textContent = statusLabels[event.status];
+				statusBadge.dataset.status = event.status;
+				activityText.textContent = event.message;
+			}
 			addActivity(event.message, event.status);
 			break;
+		case "workflow": {
+			const action = String(event.action ?? "");
+			if (action === "stage-started") {
+				routeTeamForStage(String(event.stage ?? "chat"));
+			}
+			if (action === "completed" || action === "failed") {
+				routeTeamForStage("chat");
+			}
+			break;
+		}
 		case "log":
 			addActivity(event.message, event.kind ?? "info");
 			break;
@@ -944,6 +1282,7 @@ document
 			) {
 				clearDemoTimers();
 				travelTo(destination);
+				routeNonMosinTeam(destination, destination);
 				addActivity(
 					`Manual route: ${button.textContent?.trim() ?? destination}.`,
 				);

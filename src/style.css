@@ -735,6 +735,45 @@ label > span,
 	box-shadow: 2px 2px 0 #0b0a13;
 }
 
+.avatar-walk-sprite {
+	--avatar-row: 0;
+	--avatar-row-position: 0%;
+	background-position:
+		0%
+		var(--avatar-row-position);
+	background-repeat: no-repeat;
+	background-size: 400% 800%;
+	color: transparent;
+}
+
+.avatar-walk-sprite.is-animated {
+	width: 54px;
+	height: 54px;
+	animation: avatar-library-walk 720ms linear infinite;
+}
+
+@keyframes avatar-library-walk {
+	0%,
+	24.99% {
+		background-position-x: 0%;
+	}
+
+	25%,
+	49.99% {
+		background-position-x: 33.333%;
+	}
+
+	50%,
+	74.99% {
+		background-position-x: 66.667%;
+	}
+
+	75%,
+	100% {
+		background-position-x: 100%;
+	}
+}
+
 .avatar-mosin {
 	border-color: #d6b47a;
 	background: linear-gradient(135deg, #e3d8c4 0 35%, #b88a4e 36% 60%, #5b6878 61%);
@@ -773,6 +812,15 @@ label > span,
 .avatar-commander {
 	border-color: #e2c47d;
 	background: linear-gradient(135deg, #4f3540 0 43%, #c69b57 44% 63%, #201d2e 64%);
+}
+
+/* Preset gradients are fallbacks; an atlas-backed avatar must restore sprite sizing. */
+.pixel-avatar.avatar-walk-sprite {
+	background-position:
+		0%
+		var(--avatar-row-position);
+	background-repeat: no-repeat;
+	background-size: 400% 800%;
 }
 
 .session-toolbar {
@@ -995,6 +1043,34 @@ label > span,
 	cursor: pointer;
 }
 
+.avatar-preview-button {
+	display: grid;
+	min-width: 76px;
+	place-items: center;
+	gap: 5px;
+	border: 1px solid var(--line);
+	padding: 7px !important;
+	background: #171624;
+	color: var(--ink);
+	font: inherit;
+}
+
+.avatar-preview-button:hover {
+	border-color: var(--gold);
+	background: #28263c;
+}
+
+.avatar-preview-label {
+	max-width: 68px;
+	overflow: hidden;
+	color: var(--muted);
+	font-size: 8px;
+	font-weight: 800;
+	text-overflow: ellipsis;
+	text-transform: uppercase;
+	white-space: nowrap;
+}
+
 .avatar-gallery button[data-selected="true"] {
 	outline: 2px solid var(--gold);
 	outline-offset: 2px;
@@ -1077,5 +1153,11 @@ label > span,
 	.agent-form > .dialog-actions,
 	.agent-provider-grid {
 		grid-column: auto;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.avatar-walk-sprite.is-animated {
+		animation-play-state: paused;
 	}
 }

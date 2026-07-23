@@ -1,3 +1,5 @@
+import avatarWalkAtlasUrl from "./assets/agent-avatar-walk-atlas-v1.png";
+
 type SessionMode = "chat" | "workflow";
 type SessionPermission = "read-only" | "workspace-write";
 type ProviderType = "local-codex" | "openai-api";
@@ -95,6 +97,10 @@ const avatarPresets = [
 	"commander",
 ];
 
+const avatarPresetRows = new Map(
+	avatarPresets.map((preset, row) => [preset, row]),
+);
+
 function requireElement<T extends Element>(
 	root: ParentNode,
 	selector: string,
@@ -145,6 +151,23 @@ function createAvatar(agent: Pick<AgentProfile, "avatar" | "name">): HTMLElement
 		image.src = agent.avatar;
 		image.alt = "";
 		return image;
+	}
+
+	const preset = agent.avatar.startsWith("preset:")
+		? agent.avatar.slice(7)
+		: "";
+	const atlasRow = avatarPresetRows.get(preset);
+	if (atlasRow !== undefined) {
+		const avatar = document.createElement("span");
+		avatar.className = `${avatarClass(agent.avatar)} avatar-walk-sprite`;
+		avatar.style.backgroundImage = `url("${avatarWalkAtlasUrl}")`;
+		avatar.style.setProperty("--avatar-row", String(atlasRow));
+		avatar.style.setProperty(
+			"--avatar-row-position",
+			`${(atlasRow / 7) * 100}%`,
+		);
+		avatar.setAttribute("aria-hidden", "true");
+		return avatar;
 	}
 
 	const avatar = document.createElement("span");
@@ -510,7 +533,12 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		}
 
 		window.dispatchEvent(
-			new CustomEvent("homestead:team", { detail: { agents: team } }),
+			new CustomEvent("homestead:team", {
+				detail: {
+					agents: team,
+					leadAgentId: activeSession.leadAgentId,
+				},
+			}),
 		);
 	}
 
@@ -687,13 +715,30 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		renderAgentEditorList();
 	}
 
-	for (const preset of avatarPresets) {
+	for (const [row, preset] of avatarPresets.entries()) {
 		const button = document.createElement("button");
 		button.type = "button";
-		button.className = avatarClass(`preset:${preset}`);
+		button.className = "avatar-preview-button";
 		button.dataset.avatar = `preset:${preset}`;
-		button.title = preset;
-		button.textContent = initials(preset);
+		button.title = `${preset} walking model`;
+		button.setAttribute("aria-label", `Choose ${preset} walking model`);
+
+		const preview = document.createElement("span");
+		preview.className = `${avatarClass(
+			`preset:${preset}`,
+		)} avatar-walk-sprite is-animated`;
+		preview.style.backgroundImage = `url("${avatarWalkAtlasUrl}")`;
+		preview.style.setProperty("--avatar-row", String(row));
+		preview.style.setProperty(
+			"--avatar-row-position",
+			`${(row / 7) * 100}%`,
+		);
+		preview.setAttribute("aria-hidden", "true");
+
+		const label = document.createElement("span");
+		label.className = "avatar-preview-label";
+		label.textContent = preset;
+		button.append(preview, label);
 		button.addEventListener("click", () =>
 			selectAvatar(`preset:${preset}`),
 		);

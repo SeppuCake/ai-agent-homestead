@@ -319,6 +319,9 @@ export class HomesteadStore {
 			];
 			if (unique.length > 0) {
 				session.agentIds = unique;
+				if (!session.agentIds.includes(session.leadAgentId)) {
+					session.leadAgentId = session.agentIds[0];
+				}
 			}
 		}
 		if (
