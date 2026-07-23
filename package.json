@@ -1,19 +1,24 @@
 {
   "name": "agent-homestead",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "bridge": "node server.mjs",
     "build": "tsc && vite build",
+    "start": "npm run build && node server.mjs",
     "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@types/three": "^0.185.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
   },
-  "dependencies": {
-    "three": "^0.185.1"
+  "engines": {
+    "node": ">=20"
   }
 }
