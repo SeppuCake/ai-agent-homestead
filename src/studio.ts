@@ -228,7 +228,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	context.taskForm.dataset.studioReady = "true";
 	const appShell = requireElement<HTMLElement>(document, ".app-shell");
 	const controlPanel = requireElement<HTMLElement>(document, ".control-panel");
-	const resultCard = requireElement<HTMLElement>(controlPanel, ".result-card");
+	const footer = requireElement<HTMLElement>(appShell, ".footer");
 
 	const studioShell = document.createElement("div");
 	studioShell.className = "studio-shell";
@@ -294,16 +294,30 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	controlPanel.insertBefore(sessionToolbar, context.taskForm);
 
 	const conversation = document.createElement("section");
-	conversation.className = "conversation-card";
+	conversation.className = "conversation-card panel";
 	conversation.setAttribute("aria-labelledby", "conversation-title");
 	conversation.innerHTML = `
-		<div class="section-title-row">
-			<h3 id="conversation-title">Local conversation</h3>
-			<span id="conversation-count">0 messages</span>
+		<div class="conversation-heading">
+			<div>
+				<p class="eyebrow">SESSION LOG</p>
+				<h2 id="conversation-title">Local conversation</h2>
+			</div>
+			<div class="conversation-tools">
+				<span id="conversation-count">0 messages</span>
+				<button id="conversation-latest" class="secondary-button conversation-latest-button" type="button" hidden>
+					↓ Latest
+				</button>
+			</div>
 		</div>
-		<ol id="conversation-list" class="conversation-list" aria-live="polite"></ol>
+		<ol
+			id="conversation-list"
+			class="conversation-list"
+			aria-live="polite"
+			aria-relevant="additions text"
+			tabindex="0"
+		></ol>
 	`;
-	controlPanel.insertBefore(conversation, resultCard);
+	appShell.insertBefore(conversation, footer);
 
 	const projectDialog = document.createElement("dialog");
 	projectDialog.className = "studio-dialog project-dialog";
@@ -418,6 +432,10 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		conversation,
 		"#conversation-count",
 	);
+	const conversationLatestButton = requireElement<HTMLButtonElement>(
+		conversation,
+		"#conversation-latest",
+	);
 	const projectForm = requireElement<HTMLFormElement>(
 		projectDialog,
 		"#project-form",
@@ -451,6 +469,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	let activeSession: SessionDetail | null = null;
 	let editingAgent: AgentProfile | null = null;
 	let busy = false;
+	let conversationFollowsLatest = true;
 
 	function agentById(agentId: string | null): AgentProfile | undefined {
 		return bootstrap.agents.find((agent) => agent.id === agentId);
@@ -544,12 +563,44 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		);
 	}
 
-	function renderConversation(): void {
+	function conversationIsNearLatest(): boolean {
+		const distanceFromBottom =
+			conversationList.scrollHeight -
+			conversationList.scrollTop -
+			conversationList.clientHeight;
+		return distanceFromBottom < 72;
+	}
+
+	function updateConversationLatestButton(): void {
+		conversationLatestButton.hidden = conversationFollowsLatest;
+	}
+
+	function scrollConversationToLatest(
+		behavior: ScrollBehavior = "smooth",
+	): void {
+		conversationFollowsLatest = true;
+		conversationList.scrollTo({
+			top: conversationList.scrollHeight,
+			behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+				? "auto"
+				: behavior,
+		});
+		updateConversationLatestButton();
+	}
+
+	function renderConversation(forceLatest = false): void {
+		const previousScrollTop = conversationList.scrollTop;
+		if (forceLatest) {
+			conversationFollowsLatest = true;
+		}
+
 		conversationList.replaceChildren();
 		const messages = activeSession?.messages ?? [];
-		conversationCount.textContent = `${messages.length} ${
-			messages.length === 1 ? "message" : "messages"
-		}`;
+		const visibleMessages = messages.slice(-200);
+		conversationCount.textContent =
+			messages.length > visibleMessages.length
+				? `Latest ${visibleMessages.length} of ${messages.length}`
+				: `${messages.length} ${messages.length === 1 ? "message" : "messages"}`;
 
 		if (messages.length === 0) {
 			const empty = document.createElement("li");
@@ -559,10 +610,11 @@ export async function initStudio(context: StudioContext): Promise<void> {
 					? "Give the team a brief to begin plan → build → test → deliver."
 					: "This local conversation has no messages yet.";
 			conversationList.append(empty);
+			updateConversationLatestButton();
 			return;
 		}
 
-		for (const message of messages.slice(-24)) {
+		for (const message of visibleMessages) {
 			const item = document.createElement("li");
 			item.className = `chat-message is-${message.role}`;
 			item.dataset.kind = message.kind;
@@ -586,12 +638,28 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			item.append(header, text);
 			conversationList.append(item);
 		}
-		conversationList.scrollTop = conversationList.scrollHeight;
+		requestAnimationFrame(() => {
+			if (conversationFollowsLatest) {
+				scrollConversationToLatest(forceLatest ? "auto" : "smooth");
+			} else {
+				conversationList.scrollTop = previousScrollTop;
+				updateConversationLatestButton();
+			}
+		});
 		context.resultText.textContent =
 			messages
 				.filter((message) => message.role === "assistant")
 				.at(-1)?.text ?? "No completed agent result yet.";
 	}
+
+	conversationList.addEventListener("scroll", () => {
+		conversationFollowsLatest = conversationIsNearLatest();
+		updateConversationLatestButton();
+	});
+
+	conversationLatestButton.addEventListener("click", () =>
+		scrollConversationToLatest(),
+	);
 
 	function renderSessionSettings(): void {
 		if (!activeSession) {
@@ -634,14 +702,18 @@ export async function initStudio(context: StudioContext): Promise<void> {
 				: "Read-only session. Chats and memories persist locally.";
 	}
 
-	async function loadSession(sessionId: string): Promise<void> {
+	async function loadSession(
+		sessionId: string,
+		scrollToLatest = false,
+	): Promise<void> {
+		const sessionChanged = sessionId !== activeSessionId;
 		activeSessionId = sessionId;
 		activeSession = await api<SessionDetail>(`/api/sessions/${sessionId}`);
 		activeProjectId = activeSession.projectId;
 		renderProjects();
 		renderSessions();
 		renderSessionSettings();
-		renderConversation();
+		renderConversation(scrollToLatest || sessionChanged);
 		renderTeam();
 	}
 
@@ -749,7 +821,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			(item) => item.projectId === activeProjectId,
 		);
 		if (session) {
-			await loadSession(session.id);
+			await loadSession(session.id, true);
 		} else {
 			renderSessions();
 		}
@@ -760,7 +832,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			"[data-session-id]",
 		);
 		if (button?.dataset.sessionId) {
-			void loadSession(button.dataset.sessionId);
+			void loadSession(button.dataset.sessionId, true);
 		}
 	});
 
@@ -789,7 +861,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			);
 			projectDialog.close();
 			await reloadBootstrap();
-			await loadSession(payload.session.id);
+			await loadSession(payload.session.id, true);
 		} catch (error) {
 			context.addActivity(
 				error instanceof Error ? error.message : "Could not add project",
@@ -814,7 +886,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			}),
 		});
 		await reloadBootstrap();
-		await loadSession(session.id);
+		await loadSession(session.id, true);
 		context.taskPrompt.focus();
 	}
 
@@ -999,6 +1071,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 
 		busy = true;
 		context.runTaskButton.disabled = true;
+		scrollConversationToLatest();
 		const endpoint =
 			activeSession.mode === "workflow"
 				? `/api/sessions/${activeSessionId}/workflow`
@@ -1022,7 +1095,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 				}),
 			});
 			context.taskPrompt.value = "";
-			await loadSession(activeSessionId);
+			await loadSession(activeSessionId, true);
 		} catch (error) {
 			busy = false;
 			context.runTaskButton.disabled = false;
@@ -1068,6 +1141,6 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	populateCatalogSelect(agentSkills, bootstrap.catalog.skills, "name");
 	populateCatalogSelect(agentPlugins, bootstrap.catalog.plugins, "id");
 	if (activeSessionId) {
-		await loadSession(activeSessionId);
+		await loadSession(activeSessionId, true);
 	}
 }

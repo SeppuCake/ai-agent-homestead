@@ -1,5 +1,17 @@
 {
   "editor.formatOnSave": true,
   "typescript.tsdk": "node_modules/typescript/lib",
-  "typescript.enablePromptUseWorkspaceTsdk": true
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "terminal.integrated.profiles.windows": {
+    "Agent Homestead PowerShell": {
+      "path": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "args": ["-NoLogo"],
+      "env": {
+        "Path": "${workspaceFolder}\\.tools\\node-v24.18.0-win-x64;${env:Path}",
+        "NPM_CONFIG_CACHE": "${workspaceFolder}\\.npm-cache"
+      },
+      "icon": "terminal-powershell"
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "Agent Homestead PowerShell"
 }

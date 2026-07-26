@@ -12,6 +12,8 @@ dist
 dist-ssr
 *.local
 .agent-homestead/
+.tools/
+.npm-cache/
 
 # Editor directories and files
 .vscode/*

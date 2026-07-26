@@ -4,7 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node dev.mjs",
+    "dev:ui": "vite",
     "bridge": "node server.mjs",
     "build": "tsc && vite build",
     "start": "npm run build && node server.mjs",
@@ -19,6 +20,6 @@
     "vite": "^8.1.1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   }
 }
