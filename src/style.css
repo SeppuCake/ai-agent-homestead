@@ -971,6 +971,78 @@ label > span,
 	width: min(520px, calc(100vw - 32px));
 }
 
+.approval-dialog {
+	width: min(680px, calc(100vw - 32px));
+}
+
+.approval-description {
+	margin: 0 0 16px;
+	color: var(--muted);
+	font-family: system-ui, sans-serif;
+	font-size: 12px;
+	line-height: 1.55;
+}
+
+.approval-details {
+	display: grid;
+	gap: 8px;
+	margin: 0 0 14px;
+}
+
+.approval-details > div {
+	display: grid;
+	grid-template-columns: 90px minmax(0, 1fr);
+	gap: 10px;
+	border-bottom: 1px solid var(--line);
+	padding: 0 0 8px;
+}
+
+.approval-details dt,
+.approval-command-panel > p {
+	color: var(--gold);
+	font-size: 8px;
+	font-weight: 800;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.approval-details dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+	color: var(--ink);
+	font-family: system-ui, sans-serif;
+	font-size: 11px;
+	line-height: 1.45;
+}
+
+.approval-command-panel {
+	margin: 12px 0;
+}
+
+.approval-command-panel > p {
+	margin: 0 0 7px;
+}
+
+.approval-command-panel pre {
+	max-height: 210px;
+	margin: 0;
+	border: 1px solid var(--line);
+	padding: 12px;
+	overflow: auto;
+	background: #12111e;
+	color: #f1eff9;
+	font: 11px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.approval-actions > div {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
 .project-dialog form,
 .agent-form {
 	display: grid;

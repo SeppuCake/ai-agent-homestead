@@ -83,6 +83,28 @@ interface BootstrapPayload {
 	};
 }
 
+type ApprovalDecision =
+	| "accept"
+	| "acceptForSession"
+	| "decline"
+	| "cancel";
+
+interface ApprovalRequest {
+	type: "approval-request";
+	requestId: string;
+	method: string;
+	kind: "command" | "file-change" | "permissions";
+	threadId: string | null;
+	turnId: string | null;
+	itemId: string | null;
+	reason: string;
+	command: string;
+	cwd: string;
+	grantRoot: string;
+	permissions: Record<string, unknown> | null;
+	availableDecisions: string[] | null;
+}
+
 interface StudioContext {
 	taskForm: HTMLFormElement;
 	taskPrompt: HTMLTextAreaElement;
@@ -285,9 +307,9 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		</label>
 		<label>
 			<span>Access</span>
-			<select id="session-permission">
+			<select id="session-permission" title="Approve for me keeps Codex sandboxed and automatically reviews requests that need more access.">
 				<option value="read-only">Read only</option>
-				<option value="workspace-write">Workspace write</option>
+				<option value="workspace-write">Approve for me</option>
 			</select>
 		</label>
 	`;
@@ -396,7 +418,45 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			</form>
 		</div>
 	`;
-	document.body.append(projectDialog, agentDialog);
+
+	const approvalDialog = document.createElement("dialog");
+	approvalDialog.className = "studio-dialog approval-dialog";
+	approvalDialog.setAttribute("aria-labelledby", "approval-title");
+	approvalDialog.setAttribute("aria-describedby", "approval-description");
+	approvalDialog.innerHTML = `
+		<div class="dialog-heading">
+			<div>
+				<p class="eyebrow">CODEX APPROVAL</p>
+				<h2 id="approval-title">Review requested access</h2>
+			</div>
+			<button id="approval-cancel" class="square-button" type="button" aria-label="Cancel request">&times;</button>
+		</div>
+		<p id="approval-description" class="approval-description">
+			Automatic review paused this action so that you can make the final decision.
+		</p>
+		<dl class="approval-details">
+			<div><dt>Request</dt><dd id="approval-kind"></dd></div>
+			<div id="approval-reason-row"><dt>Reason</dt><dd id="approval-reason"></dd></div>
+			<div id="approval-location-row"><dt>Location</dt><dd id="approval-location"></dd></div>
+		</dl>
+		<div id="approval-command-panel" class="approval-command-panel" hidden>
+			<p>Exact command</p>
+			<pre id="approval-command"></pre>
+		</div>
+		<div id="approval-permissions-panel" class="approval-command-panel" hidden>
+			<p>Requested permissions</p>
+			<pre id="approval-permissions"></pre>
+		</div>
+		<p id="approval-status" class="task-hint" role="status" aria-live="polite"></p>
+		<div class="dialog-actions approval-actions">
+			<button id="approval-decline" class="danger-button" type="button">Decline</button>
+			<div>
+				<button id="approval-once" class="secondary-button" type="button">Approve once</button>
+				<button id="approval-session" class="primary-button" type="button">Approve for session</button>
+			</div>
+		</div>
+	`;
+	document.body.append(projectDialog, agentDialog, approvalDialog);
 
 	const projectSelect = requireElement<HTMLSelectElement>(
 		sidebar,
@@ -457,8 +517,67 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		agentDialog,
 		"#agent-plugins",
 	);
+	const approvalKind = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-kind",
+	);
+	const approvalReasonRow = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-reason-row",
+	);
+	const approvalReason = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-reason",
+	);
+	const approvalLocationRow = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-location-row",
+	);
+	const approvalLocation = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-location",
+	);
+	const approvalCommandPanel = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-command-panel",
+	);
+	const approvalCommand = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-command",
+	);
+	const approvalPermissionsPanel = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-permissions-panel",
+	);
+	const approvalPermissions = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-permissions",
+	);
+	const approvalStatus = requireElement<HTMLElement>(
+		approvalDialog,
+		"#approval-status",
+	);
+	const approvalButtons = [
+		requireElement<HTMLButtonElement>(approvalDialog, "#approval-cancel"),
+		requireElement<HTMLButtonElement>(approvalDialog, "#approval-decline"),
+		requireElement<HTMLButtonElement>(approvalDialog, "#approval-once"),
+		requireElement<HTMLButtonElement>(approvalDialog, "#approval-session"),
+	];
+	const approvalSessionButton = approvalButtons[3];
 
-	let bootstrap = await api<BootstrapPayload>("/api/bootstrap");
+	const queuedBridgeEvents: Array<Record<string, unknown>> = [];
+	const queueBridgeEvent = (rawEvent: Event): void => {
+		queuedBridgeEvents.push(
+			(rawEvent as CustomEvent<Record<string, unknown>>).detail,
+		);
+	};
+	window.addEventListener("homestead:bridge", queueBridgeEvent);
+	let bootstrap = await api<BootstrapPayload>("/api/bootstrap").catch(
+		(error: unknown) => {
+			window.removeEventListener("homestead:bridge", queueBridgeEvent);
+			throw error;
+		},
+	);
 	let activeProjectId =
 		bootstrap.settings.activeProjectId ?? bootstrap.projects[0]?.id ?? null;
 	let activeSessionId =
@@ -470,6 +589,116 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	let editingAgent: AgentProfile | null = null;
 	let busy = false;
 	let conversationFollowsLatest = true;
+	let approvalBusy = false;
+	const approvalQueue: ApprovalRequest[] = [];
+
+	function approvalLabel(kind: ApprovalRequest["kind"]): string {
+		if (kind === "command") {
+			return "Run a command outside the current automatic boundary";
+		}
+		if (kind === "file-change") {
+			return "Write outside the current workspace boundary";
+		}
+		return "Use additional filesystem or network permissions";
+	}
+
+	function renderApproval(): void {
+		const approval = approvalQueue[0];
+		if (!approval) {
+			if (approvalDialog.open) {
+				approvalDialog.close();
+			}
+			return;
+		}
+
+		approvalKind.textContent = approvalLabel(approval.kind);
+		approvalReasonRow.hidden = !approval.reason;
+		approvalReason.textContent = approval.reason;
+		const location = approval.cwd || approval.grantRoot;
+		approvalLocationRow.hidden = !location;
+		approvalLocation.textContent = location;
+		approvalCommandPanel.hidden = !approval.command;
+		approvalCommand.textContent = approval.command;
+		approvalPermissionsPanel.hidden = !approval.permissions;
+		approvalPermissions.textContent = approval.permissions
+			? JSON.stringify(approval.permissions, null, 2)
+			: "";
+		approvalStatus.textContent = "Review the exact scope before approving.";
+		approvalSessionButton.hidden = Boolean(
+			approval.availableDecisions &&
+				!approval.availableDecisions.includes("acceptForSession"),
+		);
+		for (const button of approvalButtons) {
+			button.disabled = approvalBusy;
+		}
+		if (!approvalDialog.open) {
+			approvalDialog.showModal();
+		}
+	}
+
+	function enqueueApproval(event: Record<string, unknown>): void {
+		const requestId = String(event.requestId ?? "");
+		if (
+			!requestId ||
+			approvalQueue.some((approval) => approval.requestId === requestId)
+		) {
+			return;
+		}
+
+		approvalQueue.push({
+			type: "approval-request",
+			requestId,
+			method: String(event.method ?? ""),
+			kind:
+				event.kind === "command" || event.kind === "file-change"
+					? event.kind
+					: "permissions",
+			threadId: typeof event.threadId === "string" ? event.threadId : null,
+			turnId: typeof event.turnId === "string" ? event.turnId : null,
+			itemId: typeof event.itemId === "string" ? event.itemId : null,
+			reason: String(event.reason ?? ""),
+			command: String(event.command ?? ""),
+			cwd: String(event.cwd ?? ""),
+			grantRoot: String(event.grantRoot ?? ""),
+			permissions:
+				event.permissions && typeof event.permissions === "object"
+					? (event.permissions as Record<string, unknown>)
+					: null,
+			availableDecisions: Array.isArray(event.availableDecisions)
+				? event.availableDecisions.map(String)
+				: null,
+		});
+		renderApproval();
+	}
+
+	async function answerApproval(decision: ApprovalDecision): Promise<void> {
+		const approval = approvalQueue[0];
+		if (!approval || approvalBusy) {
+			return;
+		}
+
+		approvalBusy = true;
+		approvalStatus.textContent = "Sending your decision to Codex...";
+		renderApproval();
+		try {
+			await api(`/api/approvals/${encodeURIComponent(approval.requestId)}`, {
+				method: "POST",
+				body: JSON.stringify({ decision }),
+			});
+			const index = approvalQueue.findIndex(
+				(item) => item.requestId === approval.requestId,
+			);
+			if (index >= 0) {
+				approvalQueue.splice(index, 1);
+			}
+		} catch (error) {
+			approvalStatus.textContent =
+				error instanceof Error ? error.message : "Could not send approval";
+		} finally {
+			approvalBusy = false;
+			renderApproval();
+		}
+	}
 
 	function agentById(agentId: string | null): AgentProfile | undefined {
 		return bootstrap.agents.find((agent) => agent.id === agentId);
@@ -698,7 +927,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 				: "Continue this local session with your lead agent.";
 		context.taskHint.textContent =
 			activeSession.permission === "workspace-write"
-				? "Workspace write is enabled for this session. External deployment still requires separate confirmation."
+				? "Approve for me is enabled. Codex stays sandboxed, and external deployment still requires separate confirmation."
 				: "Read-only session. Chats and memories persist locally.";
 	}
 
@@ -960,6 +1189,22 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		"click",
 		() => editAgent(null),
 	);
+	approvalButtons[0].addEventListener("click", () =>
+		void answerApproval("cancel"),
+	);
+	approvalButtons[1].addEventListener("click", () =>
+		void answerApproval("decline"),
+	);
+	approvalButtons[2].addEventListener("click", () =>
+		void answerApproval("accept"),
+	);
+	approvalButtons[3].addEventListener("click", () =>
+		void answerApproval("acceptForSession"),
+	);
+	approvalDialog.addEventListener("cancel", (event) => {
+		event.preventDefault();
+		void answerApproval("cancel");
+	});
 
 	agentEditorList.addEventListener("click", (event) => {
 		const button = (event.target as Element).closest<HTMLButtonElement>(
@@ -1113,8 +1358,20 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		}
 	});
 
-	window.addEventListener("homestead:bridge", (rawEvent) => {
-		const event = (rawEvent as CustomEvent<Record<string, unknown>>).detail;
+	function handleStudioBridgeEvent(event: Record<string, unknown>): void {
+		if (event.type === "approval-request") {
+			enqueueApproval(event);
+		}
+		if (event.type === "approval-resolved") {
+			const requestId = String(event.requestId ?? "");
+			const index = approvalQueue.findIndex(
+				(approval) => approval.requestId === requestId,
+			);
+			if (index >= 0) {
+				approvalQueue.splice(index, 1);
+			}
+			renderApproval();
+		}
 		if (
 			(event.type === "session-message" ||
 				event.type === "agents-changed") &&
@@ -1134,7 +1391,17 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			busy = false;
 			context.runTaskButton.disabled = false;
 		}
-	});
+	}
+
+	window.addEventListener("homestead:bridge", (rawEvent) =>
+		handleStudioBridgeEvent(
+			(rawEvent as CustomEvent<Record<string, unknown>>).detail,
+		),
+	);
+	window.removeEventListener("homestead:bridge", queueBridgeEvent);
+	for (const event of queuedBridgeEvents) {
+		handleStudioBridgeEvent(event);
+	}
 
 	renderProjects();
 	renderSessions();

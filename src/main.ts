@@ -1,10 +1,7 @@
 import * as THREE from "three";
 import "./style.css";
 import { initStudio } from "./studio";
-import {
-	avatarPresetRows,
-	avatarRowTopTrim,
-} from "./avatar-atlas";
+import { avatarPresetRows, avatarRowTopTrim } from "./avatar-atlas";
 import avatarWalkAtlasUrl from "./assets/agent-avatar-walk-atlas-v1.png";
 import homesteadBackgroundUrl from "./assets/homestead-locations-background-v1.png";
 import mosinIdleUrl from "./assets/mosin-idle.png";
@@ -248,8 +245,7 @@ const taskHint = requireElement<HTMLParagraphElement>("#task-hint");
 const doneBurst = requireElement<HTMLDivElement>("#done-burst");
 const worldTitle = requireElement<HTMLHeadingElement>("#world-title");
 const controlTitle = requireElement<HTMLHeadingElement>("#control-title");
-const stationControls =
-	requireElement<HTMLDivElement>(".station-controls");
+const stationControls = requireElement<HTMLDivElement>(".station-controls");
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#171629");
@@ -627,11 +623,7 @@ function teamWorldPosition(
 ): THREE.Vector3 {
 	const base = destinations[destination];
 	const slot = index + (hasMosin ? 1 : 0);
-	return new THREE.Vector3(
-		base.x + slot * 0.9,
-		-0.73,
-		2.3 + index * 0.01,
-	);
+	return new THREE.Vector3(base.x + slot * 0.9, -0.73, 2.3 + index * 0.01);
 }
 
 function setTeamFrame(runtime: TeamAgentRuntime, frame: number): void {
@@ -698,6 +690,12 @@ function moveTeamAgent(
 		return;
 	}
 	runtime.facingLeft = target.x < runtime.root.position.x;
+	console.table({
+		agent: runtime.agent.name,
+		fromX: runtime.root.position.x,
+		targetX: target.x,
+		facingLeft: runtime.facingLeft,
+	});
 	runtime.state = "walking";
 	runtime.movement = {
 		from: runtime.root.position.clone(),
@@ -832,8 +830,7 @@ function renderTeamMarkers(agents: TeamVisual[]): void {
 			frame: 0,
 			state: currentTeamDestination,
 			facingLeft:
-				hasMosin &&
-				initialPosition.x > destinations[currentTeamDestination].x,
+				hasMosin && initialPosition.x > destinations[currentTeamDestination].x,
 			movement: null,
 		};
 		teamAgentRuntimes.set(agent.id, runtime);
@@ -1142,9 +1139,7 @@ function runDemo(): void {
 }
 
 function handleBridgeEvent(event: BridgeEvent): void {
-	window.dispatchEvent(
-		new CustomEvent("homestead:bridge", { detail: event }),
-	);
+	window.dispatchEvent(new CustomEvent("homestead:bridge", { detail: event }));
 
 	switch (event.type) {
 		case "connection":

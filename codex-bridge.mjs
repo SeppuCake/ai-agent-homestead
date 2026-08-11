@@ -5,9 +5,65 @@ import { isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const API_DEFAULT_MODEL = "gpt-5.6-terra";
+const APPROVAL_METHODS = new Set([
+	"item/commandExecution/requestApproval",
+	"item/fileChange/requestApproval",
+	"item/permissions/requestApproval",
+]);
+const APPROVAL_DECISIONS = new Set([
+	"accept",
+	"acceptForSession",
+	"decline",
+	"cancel",
+]);
 
 function clampContext(value, maximum = 14_000) {
 	return String(value ?? "").slice(0, maximum);
+}
+
+function codexSandbox(permission) {
+	return permission === "workspace-write" ? "workspaceWrite" : "readOnly";
+}
+
+function codexSandboxPolicy(permission, projectPath) {
+	if (permission === "workspace-write") {
+		return {
+			type: "workspaceWrite",
+			writableRoots: [projectPath],
+			networkAccess: false,
+		};
+	}
+
+	return { type: "readOnly" };
+}
+
+function approvalKind(method) {
+	if (method.includes("commandExecution")) {
+		return "command";
+	}
+	if (method.includes("fileChange")) {
+		return "file-change";
+	}
+	return "permissions";
+}
+
+function approvalSummary(method, params = {}) {
+	return {
+		kind: approvalKind(method),
+		threadId: params.threadId ?? null,
+		turnId: params.turnId ?? null,
+		itemId: params.itemId ?? null,
+		reason: clampContext(params.reason, 2_000),
+		command: clampContext(params.command, 8_000),
+		cwd: clampContext(params.cwd, 1_000),
+		grantRoot: clampContext(params.grantRoot, 1_000),
+		permissions: params.permissions ?? params.additionalPermissions ?? null,
+		availableDecisions: Array.isArray(params.availableDecisions)
+			? params.availableDecisions.filter(
+					(decision) => typeof decision === "string",
+				)
+			: null,
+	};
 }
 
 function codexCandidates() {
@@ -122,6 +178,7 @@ export class CodexBridge {
 		this.process = null;
 		this.requestId = 0;
 		this.pendingRequests = new Map();
+		this.approvalRequests = new Map();
 		this.loadedThreads = new Set();
 		this.activeCompletion = null;
 		this.activeTask = null;
@@ -135,6 +192,8 @@ export class CodexBridge {
 			mode: this.mode,
 			message: this.message,
 			busy: Boolean(this.activeTask),
+			approvalMode: "auto-review",
+			pendingApprovals: this.approvalRequests.size,
 			activeTask: this.activeTask
 				? {
 						sessionId: this.activeTask.sessionId,
@@ -144,6 +203,12 @@ export class CodexBridge {
 					}
 				: null,
 		};
+	}
+
+	pendingApprovals() {
+		return [...this.approvalRequests.values()].map(
+			(approval) => approval.publicRequest,
+		);
 	}
 
 	isBusy() {
@@ -190,6 +255,79 @@ export class CodexBridge {
 		} else {
 			pending.resolve(message.result);
 		}
+	}
+
+	handleApprovalRequest(message) {
+		const requestId = String(message.id);
+		const publicRequest = {
+			type: "approval-request",
+			requestId,
+			method: message.method,
+			...approvalSummary(message.method, message.params),
+		};
+
+		this.approvalRequests.set(requestId, {
+			rpcId: message.id,
+			method: message.method,
+			params: message.params ?? {},
+			publicRequest,
+		});
+		this.broadcast(publicRequest);
+		this.log(
+			`Codex needs approval for a ${publicRequest.kind} request.`,
+			"approval",
+			this.activeTask,
+		);
+	}
+
+	resolveApproval(requestId, decision) {
+		if (!APPROVAL_DECISIONS.has(decision)) {
+			throw new Error("Approval decision must be valid");
+		}
+
+		const approval = this.approvalRequests.get(String(requestId));
+		if (!approval) {
+			throw new Error("Approval request not found");
+		}
+
+		let result;
+		if (approval.method === "item/permissions/requestApproval") {
+			const requested = approval.params.permissions ?? {};
+			const granted = {};
+			if (decision === "accept" || decision === "acceptForSession") {
+				if (requested.network) {
+					granted.network = requested.network;
+				}
+				if (requested.fileSystem) {
+					granted.fileSystem = requested.fileSystem;
+				}
+			}
+			result = {
+				permissions: granted,
+				scope: decision === "acceptForSession" ? "session" : "turn",
+			};
+		} else {
+			result = { decision };
+		}
+
+		this.sendMessage({ id: approval.rpcId, result });
+		this.approvalRequests.delete(String(requestId));
+		const resolution = {
+			type: "approval-resolved",
+			requestId: String(requestId),
+			decision,
+			threadId: approval.publicRequest.threadId,
+			turnId: approval.publicRequest.turnId,
+		};
+		this.broadcast(resolution);
+		this.log(
+			decision === "accept" || decision === "acceptForSession"
+				? "Approval granted. Codex is continuing."
+				: "Approval declined. Codex is continuing within its sandbox.",
+			"approval",
+			this.activeTask,
+		);
+		return resolution;
 	}
 
 	handleNotification(message) {
@@ -284,6 +422,14 @@ export class CodexBridge {
 			(Object.hasOwn(message, "result") || Object.hasOwn(message, "error"))
 		) {
 			this.settleResponse(message);
+			return;
+		}
+
+		if (
+			Object.hasOwn(message, "id") &&
+			APPROVAL_METHODS.has(message.method)
+		) {
+			this.handleApprovalRequest(message);
 			return;
 		}
 
@@ -387,7 +533,7 @@ export class CodexBridge {
 		try {
 			this.process = spawn(
 				executable,
-				["app-server", "--listen", "stdio://"],
+				["--approve-for-me", "app-server", "--listen", "stdio://"],
 				{
 					cwd: this.rootDirectory,
 					env: process.env,
@@ -426,6 +572,16 @@ export class CodexBridge {
 				pending.reject(new Error("Codex app-server exited"));
 			}
 			this.pendingRequests.clear();
+			for (const approval of this.approvalRequests.values()) {
+				this.broadcast({
+					type: "approval-resolved",
+					requestId: approval.publicRequest.requestId,
+					decision: "cancel",
+					threadId: approval.publicRequest.threadId,
+					turnId: approval.publicRequest.turnId,
+				});
+			}
+			this.approvalRequests.clear();
 			this.mode = "demo";
 			this.message = "Demo mode";
 			this.setConnection("demo", this.message);
@@ -448,8 +604,8 @@ export class CodexBridge {
 		let threadId = session.threadIds?.[agent.id] ?? null;
 		const params = {
 			cwd: project.path,
-			approvalPolicy: "never",
-			sandbox: permission,
+			approvalPolicy: "onRequest",
+			sandbox: codexSandbox(permission),
 			developerInstructions: buildInstructions(agent, permission, stage),
 		};
 
@@ -518,6 +674,9 @@ export class CodexBridge {
 			const result = await this.sendRequest("turn/start", {
 				threadId,
 				input: [{ type: "text", text: prompt, text_elements: [] }],
+				cwd: project.path,
+				approvalPolicy: "onRequest",
+				sandboxPolicy: codexSandboxPolicy(permission, project.path),
 			});
 			this.activeTask.turnId = result?.turn?.id ?? null;
 			return await completion;

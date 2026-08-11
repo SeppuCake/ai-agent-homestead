@@ -486,6 +486,7 @@ const server = createServer(async (request, response) => {
 				agent: currentAgent,
 				busy: bridge.isBusy() || Boolean(workflowActive),
 				workflow: workflowActive,
+				approvals: bridge.pendingApprovals(),
 			});
 			return;
 		}
@@ -520,6 +521,9 @@ const server = createServer(async (request, response) => {
 				message: bridgeMessage,
 			});
 			writeSse(response, { type: "activity", ...currentAgent });
+			for (const approval of bridge.pendingApprovals()) {
+				writeSse(response, approval);
+			}
 			const keepAlive = setInterval(
 				() => response.write(": keepalive\n\n"),
 				20_000,
@@ -528,6 +532,20 @@ const server = createServer(async (request, response) => {
 				clearInterval(keepAlive);
 				clients.delete(response);
 			});
+			return;
+		}
+
+		const approvalMatch = routeMatch(
+			pathname,
+			/^\/api\/approvals\/([^/]+)$/,
+		);
+		if (approvalMatch && request.method === "POST") {
+			const payload = await readJsonBody(request);
+			const resolution = bridge.resolveApproval(
+				approvalMatch[0],
+				String(payload?.decision ?? ""),
+			);
+			writeJson(response, 200, resolution);
 			return;
 		}
 
