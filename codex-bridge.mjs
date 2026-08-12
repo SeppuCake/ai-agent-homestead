@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, win32 as windowsPath } from "node:path";
 import { createInterface } from "node:readline";
 
 const API_DEFAULT_MODEL = "gpt-5.6-terra";
@@ -21,20 +21,23 @@ function clampContext(value, maximum = 14_000) {
 	return String(value ?? "").slice(0, maximum);
 }
 
-function codexSandbox(permission) {
-	return permission === "workspace-write" ? "workspaceWrite" : "readOnly";
+// Thread methods use the legacy scalar enum; turn methods use the tagged v2 policy.
+function codexThreadSandbox(permission) {
+	return permission === "workspace-write" ? "workspace-write" : "read-only";
 }
 
-function codexSandboxPolicy(permission, projectPath) {
+function codexTurnSandboxPolicy(permission, projectPath) {
 	if (permission === "workspace-write") {
 		return {
 			type: "workspaceWrite",
 			writableRoots: [projectPath],
 			networkAccess: false,
+			excludeTmpdirEnvVar: false,
+			excludeSlashTmp: false,
 		};
 	}
 
-	return { type: "readOnly" };
+	return { type: "readOnly", networkAccess: false };
 }
 
 function approvalKind(method) {
@@ -66,24 +69,77 @@ function approvalSummary(method, params = {}) {
 	};
 }
 
+function managedCodexCandidates() {
+	if (process.platform !== "win32") {
+		return [];
+	}
+
+	const localAppData =
+		process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+	const binRoot = join(localAppData, "OpenAI", "Codex", "bin");
+
+	try {
+		return readdirSync(binRoot, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => {
+				const executable = join(binRoot, entry.name, "codex.exe");
+				let modifiedAt = 0;
+				try {
+					modifiedAt = statSync(executable).mtimeMs;
+				} catch {
+					// The resolver will ignore missing or incomplete runtime directories.
+				}
+				return { executable, modifiedAt };
+			})
+			.sort((left, right) => right.modifiedAt - left.modifiedAt)
+			.map(({ executable }) => executable);
+	} catch {
+		return [];
+	}
+}
+
 function codexCandidates() {
-	return [
+	return [...new Set([
 		process.env.CODEX_CLI_PATH,
-		process.platform === "win32"
-			? join(homedir(), ".codex", ".sandbox-bin", "codex.exe")
-			: null,
+		...managedCodexCandidates(),
 		process.platform === "win32"
 			? join(homedir(), ".codex", "plugins", ".plugin-appserver", "codex.exe")
 			: null,
+		process.platform === "win32"
+			? join(homedir(), ".codex", ".sandbox-bin", "codex.exe")
+			: null,
 		"codex",
-	].filter(Boolean);
+	].filter(Boolean))];
 }
 
-function resolveCodexExecutable() {
-	for (const candidate of codexCandidates()) {
-		if (!isAbsolute(candidate) || existsSync(candidate)) {
-			return candidate;
+export function resolveCodexExecutable(
+	candidates = codexCandidates(),
+	{ platform = process.platform, pathExists = existsSync } = {},
+) {
+	for (const candidate of candidates) {
+		const candidateIsAbsolute =
+			platform === "win32"
+				? windowsPath.isAbsolute(candidate)
+				: isAbsolute(candidate);
+		if (!candidateIsAbsolute) {
+			if (platform !== "win32") {
+				return candidate;
+			}
+			continue;
 		}
+		if (!pathExists(candidate)) {
+			continue;
+		}
+		if (platform === "win32") {
+			const codeModeHost = windowsPath.join(
+				windowsPath.dirname(candidate),
+				"codex-code-mode-host.exe",
+			);
+			if (!pathExists(codeModeHost)) {
+				continue;
+			}
+		}
+		return candidate;
 	}
 	return null;
 }
@@ -168,7 +224,14 @@ function buildInstructions(agent, permission, stage) {
 }
 
 export class CodexBridge {
-	constructor({ rootDirectory, store, broadcast, setConnection, setAgent, log }) {
+	constructor({
+		rootDirectory,
+		store,
+		broadcast,
+		setConnection,
+		setAgent,
+		log,
+	}) {
 		this.rootDirectory = rootDirectory;
 		this.store = store;
 		this.broadcast = broadcast;
@@ -394,7 +457,11 @@ export class CodexBridge {
 				break;
 			}
 			case "error":
-				this.log(params?.message ?? "Codex reported an error.", "error", active);
+				this.log(
+					params?.message ?? "Codex reported an error.",
+					"error",
+					active,
+				);
 				break;
 			case "warning":
 			case "configWarning":
@@ -425,10 +492,7 @@ export class CodexBridge {
 			return;
 		}
 
-		if (
-			Object.hasOwn(message, "id") &&
-			APPROVAL_METHODS.has(message.method)
-		) {
+		if (Object.hasOwn(message, "id") && APPROVAL_METHODS.has(message.method)) {
 			this.handleApprovalRequest(message);
 			return;
 		}
@@ -445,7 +509,10 @@ export class CodexBridge {
 				title: "Agent Homestead",
 				version: "2.0.0",
 			},
-			capabilities: { experimentalApi: true },
+			capabilities: {
+				experimentalApi: true,
+				requestAttestation: false,
+			},
 		});
 		this.sendMessage({ method: "initialized", params: {} });
 		this.mode = "live";
@@ -508,9 +575,7 @@ export class CodexBridge {
 					}
 				}
 			}
-			plugins = [...byId.values()].sort((a, b) =>
-				a.name.localeCompare(b.name),
-			);
+			plugins = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
 		} catch (error) {
 			errors.push(`Plugins: ${error.message}`);
 		}
@@ -526,9 +591,13 @@ export class CodexBridge {
 			this.mode = "demo";
 			this.message = "Demo mode";
 			this.setConnection("demo", this.message);
-			this.log("Codex CLI was not found. Demo mode is active.", "offline");
+			this.log(
+				"No complete Codex CLI and Code Mode host bundle was found. Demo mode is active.",
+				"offline",
+			);
 			return;
 		}
+		this.log(`Codex runtime selected: ${executable}`, "runtime");
 
 		try {
 			this.process = spawn(
@@ -551,6 +620,12 @@ export class CodexBridge {
 
 		const output = createInterface({ input: this.process.stdout });
 		output.on("line", (line) => this.handleLine(line));
+		const errors = createInterface({ input: this.process.stderr });
+		errors.on("line", (line) => {
+			if (line.trim()) {
+				this.log(`Codex runtime: ${clampContext(line, 2_000)}`, "warning");
+			}
+		});
 
 		this.process.once("error", (error) => {
 			this.mode = "demo";
@@ -604,14 +679,19 @@ export class CodexBridge {
 		let threadId = session.threadIds?.[agent.id] ?? null;
 		const params = {
 			cwd: project.path,
-			approvalPolicy: "onRequest",
-			sandbox: codexSandbox(permission),
+			approvalPolicy: "on-request",
+			sandbox: codexThreadSandbox(permission),
 			developerInstructions: buildInstructions(agent, permission, stage),
 		};
 
-		if (threadId && !this.loadedThreads.has(threadId)) {
+		if (threadId) {
 			try {
-				await this.sendRequest("thread/resume", { threadId, ...params });
+				// Refresh sticky instructions and permissions before every stage or chat turn.
+				await this.sendRequest("thread/resume", {
+					threadId,
+					...params,
+					excludeTurns: true,
+				});
 				this.loadedThreads.add(threadId);
 			} catch {
 				threadId = null;
@@ -668,17 +748,23 @@ export class CodexBridge {
 			`${agent.name} is moving to the ${stage} station.`,
 			this.activeTask,
 		);
-		this.broadcast({ type: "agent-activity", ...this.activeTask, status: "walking" });
+		this.broadcast({
+			type: "agent-activity",
+			...this.activeTask,
+			status: "walking",
+		});
 
 		try {
 			const result = await this.sendRequest("turn/start", {
 				threadId,
 				input: [{ type: "text", text: prompt, text_elements: [] }],
 				cwd: project.path,
-				approvalPolicy: "onRequest",
-				sandboxPolicy: codexSandboxPolicy(permission, project.path),
+				approvalPolicy: "on-request",
+				sandboxPolicy: codexTurnSandboxPolicy(permission, project.path),
 			});
-			this.activeTask.turnId = result?.turn?.id ?? null;
+			if (this.activeTask) {
+				this.activeTask.turnId = result?.turn?.id ?? null;
+			}
 			return await completion;
 		} catch (error) {
 			this.activeTask = null;
@@ -711,7 +797,11 @@ export class CodexBridge {
 			`${agent.name} is running through the OpenAI API.`,
 			this.activeTask,
 		);
-		this.broadcast({ type: "agent-activity", ...this.activeTask, status: "working" });
+		this.broadcast({
+			type: "agent-activity",
+			...this.activeTask,
+			status: "working",
+		});
 
 		try {
 			const body = {

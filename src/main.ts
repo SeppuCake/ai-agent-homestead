@@ -4,6 +4,7 @@ import { initStudio } from "./studio";
 import { avatarPresetRows, avatarRowTopTrim } from "./avatar-atlas";
 import avatarWalkAtlasUrl from "./assets/agent-avatar-walk-atlas-v1.png";
 import homesteadBackgroundUrl from "./assets/homestead-locations-background-v1.png";
+import mosinCafeIdleUrl from "./assets/mosin-idle-cafe-sheet-v2.png";
 import mosinIdleUrl from "./assets/mosin-idle.png";
 import mosinWaitingUrl from "./assets/mosin-waiting-sheet-v1.png";
 import mosinWalkingUrl from "./assets/mosin-walking-atlas-v3-aligned.png";
@@ -338,6 +339,20 @@ const idleAnimation = createAnimation({
 	loop: true,
 });
 
+// This sheet is already a composed scene containing Mosin, Springfield, their
+// cups, and the cafe bar. Keeping it as one animation guarantees that the two
+// characters cannot drift out of sync.
+const cafePairIdleAnimation = createAnimation({
+	url: mosinCafeIdleUrl,
+	frameCount: 4,
+	columns: 4,
+	rows: 1,
+	displaySize: new THREE.Vector2(2.4, 3.6),
+	visualOffset: new THREE.Vector2(0, 0),
+	fps: 1.5,
+	loop: true,
+});
+
 const mosinAnimations: Record<AgentStatus, AnimationDefinition> = {
 	idle: idleAnimation,
 	walking: createAnimation({
@@ -514,6 +529,13 @@ function isMosinAgent(agent: TeamVisual): boolean {
 	);
 }
 
+function isSpringfieldAgent(agent: TeamVisual): boolean {
+	return (
+		presetName(agent.avatar)?.trim().toLowerCase() === "springfield" ||
+		agent.name.trim().toLowerCase() === "springfield"
+	);
+}
+
 function presetAvatarTexture(agent: TeamVisual): THREE.CanvasTexture {
 	const canvas = document.createElement("canvas");
 	canvas.width = 32;
@@ -640,7 +662,9 @@ function setTeamFrame(runtime: TeamAgentRuntime, frame: number): void {
 
 function syncTeamMarkerVisibility(): void {
 	for (const runtime of teamAgentRuntimes.values()) {
-		runtime.root.visible = true;
+		runtime.root.visible = !(
+			cafePairIdleActive && isSpringfieldAgent(runtime.agent)
+		);
 	}
 }
 
@@ -667,6 +691,7 @@ function animateTeamMovement(currentTime: number): void {
 		runtime.movement = null;
 		setTeamFrame(runtime, runtime.state === "waiting" ? 1 : 0);
 	}
+	syncCafePairIdle();
 	syncTeamMarkerVisibility();
 	renderScene();
 	teamMovementFrame = stillMoving
@@ -728,6 +753,7 @@ function routeNonMosinTeam(
 	arrivalState: AgentStatus,
 ): void {
 	currentTeamDestination = destination;
+	syncCafePairIdle();
 	const hasMosin = activeTeamVisuals.some(isMosinAgent);
 	const runtimes = [...teamAgentRuntimes.values()];
 
@@ -740,6 +766,7 @@ function routeNonMosinTeam(
 			hasMosin && target.x > destinations[destination].x,
 		);
 	}
+	syncCafePairIdle();
 	syncTeamMarkerVisibility();
 }
 
@@ -776,18 +803,28 @@ function routeTeamActivity(event: ActivityEvent): boolean {
 			arrivalState,
 			hasMosin && target.x > destinations[destination].x,
 		);
+		// A walking activity can target the station the agent already occupies
+		// (for example, a chat task while Springfield is at the cafe). Preserve
+		// the non-idle activity state until the next activity event so paired
+		// idle stops immediately instead of restarting without any movement.
+		if (runtime.movement === null) {
+			runtime.state = "walking";
+			setTeamFrame(runtime, 0);
+		}
 	} else if (runtime.movement) {
 		runtime.movement.arrivalState = event.status;
 	} else {
 		runtime.state = event.status;
 		setTeamFrame(runtime, event.status === "waiting" ? 1 : 0);
 	}
+	syncCafePairIdle();
 	syncTeamMarkerVisibility();
 	renderScene();
 	return true;
 }
 
 function renderTeamMarkers(agents: TeamVisual[]): void {
+	stopCafePairIdle();
 	activeTeamVisuals = agents;
 	teamAgentsRoot.traverse((object) => {
 		if (object instanceof THREE.Sprite) {
@@ -851,6 +888,7 @@ function renderTeamMarkers(agents: TeamVisual[]): void {
 			});
 		}
 	}
+	syncCafePairIdle();
 	syncTeamMarkerVisibility();
 	renderScene();
 }
@@ -858,6 +896,10 @@ function renderTeamMarkers(agents: TeamVisual[]): void {
 window.setInterval(() => {
 	const currentTick = Math.floor(performance.now() / 125);
 	for (const runtime of teamAgentRuntimes.values()) {
+		if (cafePairIdleActive && isSpringfieldAgent(runtime.agent)) {
+			runtime.sprite.position.y = 0;
+			continue;
+		}
 		const shouldAnimate =
 			runtime.state === "walking" || runtime.state === "working";
 		if (shouldAnimate) {
@@ -910,6 +952,7 @@ let spriteAnimationTimer: number | null = null;
 let movementFrame: number | null = null;
 let movementTarget: DestinationStatus | null = null;
 let movementArrivalStatus: AgentStatus = "idle";
+let cafePairIdleActive = false;
 let demoTimers: number[] = [];
 let connectionMode: ConnectionMode = "connecting";
 let activityEventCount = 0;
@@ -946,9 +989,8 @@ function stopSpriteAnimation(): void {
 	spriteAnimationTimer = null;
 }
 
-function playMosinAnimation(status: AgentStatus): void {
+function playAnimation(animation: AnimationDefinition): void {
 	stopSpriteAnimation();
-	const animation = mosinAnimations[status];
 	mosinSprite.scale.set(animation.displaySize.x, animation.displaySize.y, 1);
 	mosinSprite.position.set(
 		animation.visualOffset.x,
@@ -973,13 +1015,72 @@ function playMosinAnimation(status: AgentStatus): void {
 	}, 1000 / animation.fps);
 }
 
+function playMosinAnimation(status: AgentStatus): void {
+	playAnimation(mosinAnimations[status]);
+}
+
+function springfieldRuntime(): TeamAgentRuntime | undefined {
+	return [...teamAgentRuntimes.values()].find((runtime) =>
+		isSpringfieldAgent(runtime.agent),
+	);
+}
+
+function canPlayCafePairIdle(): boolean {
+	const springfield = springfieldRuntime();
+	return (
+		activeTeamVisuals.some(isMosinAgent) &&
+		springfield !== undefined &&
+		currentStatus === "idle" &&
+		currentTeamDestination === "idle" &&
+		movementFrame === null &&
+		movementTarget === null &&
+		mosinRoot.position.distanceTo(destinations.idle) < 0.02 &&
+		springfield.state === "idle" &&
+		springfield.movement === null
+	);
+}
+
+function startCafePairIdle(): void {
+	if (cafePairIdleActive) {
+		return;
+	}
+
+	cafePairIdleActive = true;
+	isMosinFacingLeft = false;
+	playAnimation(cafePairIdleAnimation);
+	syncTeamMarkerVisibility();
+}
+
+function stopCafePairIdle(): void {
+	if (!cafePairIdleActive) {
+		return;
+	}
+
+	cafePairIdleActive = false;
+	syncTeamMarkerVisibility();
+	playMosinAnimation(currentStatus);
+}
+
+function syncCafePairIdle(): boolean {
+	if (canPlayCafePairIdle()) {
+		startCafePairIdle();
+	} else {
+		stopCafePairIdle();
+	}
+
+	return cafePairIdleActive;
+}
+
 function updateStatus(status: AgentStatus, message?: string): void {
+	const wasCafePairIdleActive = cafePairIdleActive;
 	currentStatus = status;
 	statusBadge.textContent = statusLabels[status];
 	statusBadge.dataset.status = status;
 	activityText.textContent = message ?? statusMessages[status];
 	doneBurst.classList.toggle("is-visible", status === "done");
-	playMosinAnimation(status);
+	if (!syncCafePairIdle() && !wasCafePairIdleActive) {
+		playMosinAnimation(status);
+	}
 	syncTeamMarkerVisibility();
 }
 
@@ -996,6 +1097,7 @@ function travelTo(
 	arrivalStatus: AgentStatus = destinationStatus,
 	message?: string,
 ): void {
+	stopCafePairIdle();
 	if (movementFrame !== null && movementTarget === destinationStatus) {
 		movementArrivalStatus = arrivalStatus;
 		if (message) {
@@ -1293,7 +1395,9 @@ document
 		});
 	});
 
-playMosinAnimation(currentStatus);
+if (!syncCafePairIdle()) {
+	playMosinAnimation(currentStatus);
+}
 renderScene();
 setConnection("connecting", "Connecting to Codex…");
 void readBridgeStatus();

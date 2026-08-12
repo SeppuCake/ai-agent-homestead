@@ -459,6 +459,9 @@ function errorStatus(error) {
 	if (message.includes("already working") || message.includes("already running")) {
 		return 409;
 	}
+	if (message.includes("currently running")) {
+		return 409;
+	}
 	if (
 		message.includes("must be") ||
 		message.includes("requires") ||
@@ -591,6 +594,23 @@ const server = createServer(async (request, response) => {
 			const payload = await readJsonBody(request);
 			const session = await store.updateSession(sessionMatch[0], payload);
 			writeJson(response, 200, session);
+			return;
+		}
+		if (sessionMatch && request.method === "DELETE") {
+			const activeTask = bridge.status().activeTask;
+			if (
+				activeTask?.sessionId === sessionMatch[0] ||
+				workflowActive?.sessionId === sessionMatch[0]
+			) {
+				throw new Error("Session is currently running and cannot be deleted");
+			}
+			const result = await store.deleteSession(sessionMatch[0]);
+			broadcast({
+				type: "sessions-changed",
+				deletedSessionId: sessionMatch[0],
+				activeSessionId: result.activeSessionId,
+			});
+			writeJson(response, 200, result);
 			return;
 		}
 

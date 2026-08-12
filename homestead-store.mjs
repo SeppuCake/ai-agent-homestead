@@ -2,8 +2,15 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-const STORE_VERSION = 2;
+const STORE_VERSION = 3;
 const now = () => new Date().toISOString();
+
+function sessionMode(value) {
+	if (value === "workflow" || value === "ad-hoc") {
+		return value;
+	}
+	return "chat";
+}
 
 function createDefaultState(rootDirectory) {
 	const createdAt = now();
@@ -180,7 +187,7 @@ export class HomesteadStore {
 				session.permission === "workspace-write"
 					? "workspace-write"
 					: "read-only";
-			session.mode = session.mode === "workflow" ? "workflow" : "chat";
+			session.mode = sessionMode(session.mode);
 		}
 
 		if (!projectIds.has(this.state.settings?.activeProjectId)) {
@@ -273,7 +280,7 @@ export class HomesteadStore {
 			id: randomUUID(),
 			projectId: project.id,
 			title: clampText(input?.title, 100, "New Homestead Chat"),
-			mode: input?.mode === "workflow" ? "workflow" : "chat",
+			mode: sessionMode(input?.mode),
 			permission:
 				input?.permission === "workspace-write"
 					? "workspace-write"
@@ -305,7 +312,7 @@ export class HomesteadStore {
 			session.title = clampText(input.title, 100, session.title);
 		}
 		if (input?.mode !== undefined) {
-			session.mode = input.mode === "workflow" ? "workflow" : "chat";
+			session.mode = sessionMode(input.mode);
 		}
 		if (input?.permission !== undefined) {
 			session.permission =
@@ -337,6 +344,28 @@ export class HomesteadStore {
 		this.state.settings.activeSessionId = session.id;
 		await this.persist();
 		return publicSession(session, true);
+	}
+
+	async deleteSession(sessionId) {
+		const index = this.state.sessions.findIndex(
+			(session) => session.id === sessionId,
+		);
+		if (index < 0) {
+			throw new Error("Session not found");
+		}
+
+		const [deleted] = this.state.sessions.splice(index, 1);
+		if (this.state.settings.activeSessionId === sessionId) {
+			this.state.settings.activeSessionId =
+				this.state.sessions.find(
+					(session) => session.projectId === deleted.projectId,
+				)?.id ?? null;
+		}
+		await this.persist();
+		return {
+			deleted: true,
+			activeSessionId: this.state.settings.activeSessionId,
+		};
 	}
 
 	async addMessage(sessionId, message) {

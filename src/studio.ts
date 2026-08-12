@@ -6,7 +6,7 @@ import {
 	avatarTopTrim,
 } from "./avatar-atlas";
 
-type SessionMode = "chat" | "workflow";
+type SessionMode = "chat" | "workflow" | "ad-hoc";
 type SessionPermission = "read-only" | "workspace-write";
 type ProviderType = "local-codex" | "openai-api";
 
@@ -81,6 +81,14 @@ interface BootstrapPayload {
 		plugins: CatalogItem[];
 		catalogErrors: string[];
 	};
+	bridge?: {
+		mode: "connecting" | "live" | "demo" | "offline";
+	};
+}
+
+interface DeleteSessionResponse {
+	deleted: true;
+	activeSessionId: string | null;
 }
 
 type ApprovalDecision =
@@ -269,9 +277,32 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		<div class="session-actions">
 			<button id="new-chat" class="secondary-button" type="button">+ Chat</button>
 			<button id="new-workflow" class="secondary-button" type="button">+ Workflow</button>
+			<button id="new-ad-hoc" class="secondary-button" type="button">+ Ad-hoc</button>
 		</div>
 		<nav aria-label="Chat sessions">
-			<ol id="session-list" class="session-list"></ol>
+			<div id="session-groups" class="session-groups">
+				<section class="session-group" aria-labelledby="chat-sessions-title">
+					<div class="session-group-heading">
+						<h3 id="chat-sessions-title">Chats</h3>
+						<span id="chat-session-count">0</span>
+					</div>
+					<ol id="chat-session-list" class="session-list"></ol>
+				</section>
+				<section class="session-group" aria-labelledby="workflow-sessions-title">
+					<div class="session-group-heading">
+						<h3 id="workflow-sessions-title">Workflows</h3>
+						<span id="workflow-session-count">0</span>
+					</div>
+					<ol id="workflow-session-list" class="session-list"></ol>
+				</section>
+				<section class="session-group" aria-labelledby="ad-hoc-sessions-title">
+					<div class="session-group-heading">
+						<h3 id="ad-hoc-sessions-title">Ad-hoc Chats</h3>
+						<span id="ad-hoc-session-count">0</span>
+					</div>
+					<ol id="ad-hoc-session-list" class="session-list"></ol>
+				</section>
+			</div>
 		</nav>
 		<div class="studio-team-summary">
 			<div class="section-title-row">
@@ -295,6 +326,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			<select id="session-mode">
 				<option value="chat">Chat</option>
 				<option value="workflow">Workflow</option>
+				<option value="ad-hoc">Ad-hoc chat</option>
 			</select>
 		</label>
 		<label>
@@ -462,7 +494,23 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		sidebar,
 		"#project-select",
 	);
-	const sessionList = requireElement<HTMLOListElement>(sidebar, "#session-list");
+	const sessionGroups = requireElement<HTMLDivElement>(sidebar, "#session-groups");
+	const sessionLists: Record<SessionMode, HTMLOListElement> = {
+		chat: requireElement<HTMLOListElement>(sidebar, "#chat-session-list"),
+		workflow: requireElement<HTMLOListElement>(
+			sidebar,
+			"#workflow-session-list",
+		),
+		"ad-hoc": requireElement<HTMLOListElement>(
+			sidebar,
+			"#ad-hoc-session-list",
+		),
+	};
+	const sessionCounts: Record<SessionMode, HTMLElement> = {
+		chat: requireElement<HTMLElement>(sidebar, "#chat-session-count"),
+		workflow: requireElement<HTMLElement>(sidebar, "#workflow-session-count"),
+		"ad-hoc": requireElement<HTMLElement>(sidebar, "#ad-hoc-session-count"),
+	};
 	const teamRoster = requireElement<HTMLDivElement>(sidebar, "#team-roster");
 	const activeSessionTitle = requireElement<HTMLElement>(
 		sessionToolbar,
@@ -733,32 +781,63 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	}
 
 	function renderSessions(): void {
-		sessionList.replaceChildren();
 		const sessions = bootstrap.sessions.filter(
 			(session) => session.projectId === activeProjectId,
 		);
+		const modeLabels: Record<SessionMode, string> = {
+			chat: "CH",
+			workflow: "WF",
+			"ad-hoc": "AH",
+		};
 
-		for (const session of sessions) {
-			const item = document.createElement("li");
-			const button = document.createElement("button");
-			button.type = "button";
-			button.className = "session-item";
-			button.dataset.active = String(session.id === activeSessionId);
-			button.dataset.sessionId = session.id;
+		for (const mode of ["chat", "workflow", "ad-hoc"] as const) {
+			const list = sessionLists[mode];
+			const matchingSessions = sessions.filter(
+				(session) => session.mode === mode,
+			);
+			list.replaceChildren();
+			sessionCounts[mode].textContent = String(matchingSessions.length);
 
-			const mode = document.createElement("span");
-			mode.className = "session-mode-icon";
-			mode.textContent = session.mode === "workflow" ? "WF" : "CH";
-			const copy = document.createElement("span");
-			const title = document.createElement("strong");
-			title.textContent = session.title;
-			const preview = document.createElement("small");
-			preview.textContent =
-				session.lastMessage || `${session.messageCount} saved messages`;
-			copy.append(title, preview);
-			button.append(mode, copy);
-			item.append(button);
-			sessionList.append(item);
+			if (matchingSessions.length === 0) {
+				const empty = document.createElement("li");
+				empty.className = "session-list-empty";
+				empty.textContent = `No ${mode === "ad-hoc" ? "ad-hoc chats" : mode === "workflow" ? "workflows" : "chats"} yet.`;
+				list.append(empty);
+				continue;
+			}
+
+			for (const session of matchingSessions) {
+				const item = document.createElement("li");
+				item.className = "session-row";
+				const button = document.createElement("button");
+				button.type = "button";
+				button.className = "session-item";
+				button.dataset.active = String(session.id === activeSessionId);
+				button.dataset.sessionId = session.id;
+
+				const modeIcon = document.createElement("span");
+				modeIcon.className = "session-mode-icon";
+				modeIcon.textContent = modeLabels[session.mode];
+				const copy = document.createElement("span");
+				const title = document.createElement("strong");
+				title.textContent = session.title;
+				const preview = document.createElement("small");
+				preview.textContent =
+					session.lastMessage || `${session.messageCount} saved messages`;
+				copy.append(title, preview);
+				button.append(modeIcon, copy);
+
+				const deleteButton = document.createElement("button");
+				deleteButton.type = "button";
+				deleteButton.className = "session-delete-button";
+				deleteButton.dataset.deleteSessionId = session.id;
+				deleteButton.setAttribute("aria-label", `Delete ${session.title}`);
+				deleteButton.title = "Delete this local chat";
+				deleteButton.textContent = "\u00d7";
+
+				item.append(button, deleteButton);
+				list.append(item);
+			}
 		}
 	}
 
@@ -920,15 +999,34 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		context.runTaskButton.textContent =
 			activeSession.mode === "workflow"
 				? "Run agent workflow"
-				: "Send message";
+				: activeSession.mode === "ad-hoc"
+					? "Send ad-hoc message"
+					: "Send message";
 		context.taskPrompt.placeholder =
 			activeSession.mode === "workflow"
 				? "Describe what the team should plan, build, test, and deliver."
-				: "Continue this local session with your lead agent.";
+				: activeSession.mode === "ad-hoc"
+					? "Ask a quick one-off question or request."
+					: "Continue this local session with your lead agent.";
 		context.taskHint.textContent =
 			activeSession.permission === "workspace-write"
 				? "Approve for me is enabled. Codex stays sandboxed, and external deployment still requires separate confirmation."
 				: "Read-only session. Chats and memories persist locally.";
+	}
+
+	function renderNoActiveSession(): void {
+		activeSession = null;
+		activeSessionId = null;
+		activeSessionTitle.textContent = "No active session";
+		leadAgentSelect.replaceChildren();
+		sessionTeam.replaceChildren();
+		context.taskPrompt.value = "";
+		context.taskPrompt.placeholder = "Create a chat, workflow, or ad-hoc chat to begin.";
+		context.taskHint.textContent = "Choose a category above to create a new local session.";
+		context.runTaskButton.disabled = true;
+		context.resultText.textContent = "No active session.";
+		renderConversation(true);
+		renderTeam();
 	}
 
 	async function loadSession(
@@ -952,8 +1050,23 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		renderSessions();
 		populateCatalogSelect(agentSkills, bootstrap.catalog.skills, "name");
 		populateCatalogSelect(agentPlugins, bootstrap.catalog.plugins, "id");
+		if (
+			activeSessionId &&
+			bootstrap.sessions.some((session) => session.id === activeSessionId)
+		) {
+			await loadSession(activeSessionId);
+			return;
+		}
+		activeSessionId =
+			bootstrap.settings.activeSessionId ??
+			bootstrap.sessions.find(
+				(session) => session.projectId === activeProjectId,
+			)?.id ??
+			null;
 		if (activeSessionId) {
 			await loadSession(activeSessionId);
+		} else {
+			renderNoActiveSession();
 		}
 	}
 
@@ -1053,10 +1166,18 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			await loadSession(session.id, true);
 		} else {
 			renderSessions();
+			renderNoActiveSession();
 		}
 	});
 
-	sessionList.addEventListener("click", (event) => {
+	sessionGroups.addEventListener("click", (event) => {
+		const deleteButton = (event.target as Element).closest<HTMLButtonElement>(
+			"[data-delete-session-id]",
+		);
+		if (deleteButton?.dataset.deleteSessionId) {
+			void deleteSession(deleteButton.dataset.deleteSessionId);
+			return;
+		}
 		const button = (event.target as Element).closest<HTMLButtonElement>(
 			"[data-session-id]",
 		);
@@ -1104,13 +1225,18 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			return;
 		}
 		const title =
-			mode === "workflow" ? "New Agent Workflow" : "New Homestead Chat";
+			mode === "workflow"
+				? "New Agent Workflow"
+				: mode === "ad-hoc"
+					? "New Ad-hoc Chat"
+					: "New Homestead Chat";
 		const session = await api<SessionDetail>("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({
 				projectId: activeProjectId,
 				title,
 				mode,
+				permission: mode === "ad-hoc" ? "read-only" : undefined,
 				agentIds: bootstrap.agents.slice(0, 2).map((agent) => agent.id),
 			}),
 		});
@@ -1127,6 +1253,41 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		"click",
 		() => void createSession("workflow"),
 	);
+	requireElement<HTMLButtonElement>(sidebar, "#new-ad-hoc").addEventListener(
+		"click",
+		() => void createSession("ad-hoc"),
+	);
+
+	async function deleteSession(sessionId: string): Promise<void> {
+		const session = bootstrap.sessions.find((item) => item.id === sessionId);
+		if (!session) {
+			return;
+		}
+		const confirmed = window.confirm(
+			`Delete “${session.title}” and its saved Agent Homestead messages?\n\nProject files will not be deleted. Any associated Codex task may remain in Codex history.`,
+		);
+		if (!confirmed) {
+			return;
+		}
+
+		try {
+			const result = await api<DeleteSessionResponse>(
+				`/api/sessions/${sessionId}`,
+				{ method: "DELETE" },
+			);
+			if (activeSessionId === sessionId) {
+				activeSessionId = result.activeSessionId;
+				activeSession = null;
+			}
+			await reloadBootstrap();
+			context.addActivity(`Deleted local session: ${session.title}.`, "success");
+		} catch (error) {
+			context.addActivity(
+				error instanceof Error ? error.message : "Could not delete session",
+				"error",
+			);
+		}
+	}
 
 	async function patchActiveSession(
 		patch: Partial<SessionDetail>,
@@ -1374,8 +1535,11 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		}
 		if (
 			(event.type === "session-message" ||
+				event.type === "sessions-changed" ||
 				event.type === "agents-changed") &&
-			(event.sessionId === activeSessionId || event.type === "agents-changed")
+			(event.sessionId === activeSessionId ||
+				event.type === "sessions-changed" ||
+				event.type === "agents-changed")
 		) {
 			void reloadBootstrap();
 		}
