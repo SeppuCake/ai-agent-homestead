@@ -37,7 +37,29 @@ interface ChatMessage {
 	text: string;
 	kind: string;
 	stage: string;
+	attachments: AttachmentSummary[];
 	createdAt: string;
+}
+
+interface AttachmentSummary {
+	id: string;
+	name: string;
+	type: string;
+	size: number;
+	kind: "image" | "file";
+}
+
+interface AttachmentPayload {
+	name: string;
+	type: string;
+	size: number;
+	dataUrl: string;
+}
+
+interface PendingAttachment {
+	id: string;
+	file: File;
+	previewUrl: string | null;
 }
 
 interface SessionSummary {
@@ -120,6 +142,57 @@ interface StudioContext {
 	taskHint: HTMLParagraphElement;
 	resultText: HTMLParagraphElement;
 	addActivity: (message: string, kind?: string) => void;
+}
+
+const MAX_ATTACHMENT_COUNT = 4;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const acceptedAttachmentExtensions = new Set([
+	"png",
+	"jpg",
+	"jpeg",
+	"webp",
+	"pdf",
+	"txt",
+	"md",
+	"json",
+	"csv",
+	"ts",
+	"tsx",
+	"js",
+	"jsx",
+	"css",
+	"html",
+	"xml",
+	"yaml",
+	"yml",
+]);
+
+function isAcceptedAttachment(file: File): boolean {
+	const extension = file.name.split(".").at(-1)?.toLowerCase() ?? "";
+	return acceptedAttachmentExtensions.has(extension);
+}
+
+function fileSize(bytes: number): string {
+	return bytes < 1024 * 1024
+		? `${Math.max(1, Math.round(bytes / 1024))} KB`
+		: `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.addEventListener("load", () => {
+			if (typeof reader.result === "string") {
+				resolve(reader.result);
+				return;
+			}
+			reject(new Error(`Could not encode ${file.name}`));
+		});
+		reader.addEventListener("error", () =>
+			reject(new Error(`Could not read ${file.name}`)),
+		);
+		reader.readAsDataURL(file);
+	});
 }
 
 function setAvatarAtlasPosition(
@@ -258,7 +331,10 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	context.taskForm.dataset.studioReady = "true";
 	const appShell = requireElement<HTMLElement>(document, ".app-shell");
 	const controlPanel = requireElement<HTMLElement>(document, ".control-panel");
-	const footer = requireElement<HTMLElement>(appShell, ".footer");
+	const conversationSlot = requireElement<HTMLElement>(
+		appShell,
+		"#conversation-slot",
+	);
 
 	const studioShell = document.createElement("div");
 	studioShell.className = "studio-shell";
@@ -371,7 +447,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			tabindex="0"
 		></ol>
 	`;
-	appShell.insertBefore(conversation, footer);
+	conversationSlot.append(conversation);
 
 	const projectDialog = document.createElement("dialog");
 	projectDialog.className = "studio-dialog project-dialog";
@@ -524,6 +600,18 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		sessionToolbar,
 		"#session-permission",
 	);
+	const privacyChip = requireElement<HTMLButtonElement>(
+		controlPanel,
+		"#privacy-chip",
+	);
+	const attachmentInput = requireElement<HTMLInputElement>(
+		context.taskForm,
+		"#task-attachments",
+	);
+	const attachmentList = requireElement<HTMLUListElement>(
+		context.taskForm,
+		"#attachment-list",
+	);
 	const leadAgentSelect = requireElement<HTMLSelectElement>(
 		sessionToolbar,
 		"#lead-agent",
@@ -636,6 +724,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 	let activeSession: SessionDetail | null = null;
 	let editingAgent: AgentProfile | null = null;
 	let busy = false;
+	let pendingAttachments: PendingAttachment[] = [];
 	let conversationFollowsLatest = true;
 	let approvalBusy = false;
 	const approvalQueue: ApprovalRequest[] = [];
@@ -944,6 +1033,23 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			const text = document.createElement("p");
 			text.textContent = message.text;
 			item.append(header, text);
+			if (message.attachments?.length > 0) {
+				const attached = document.createElement("ul");
+				attached.className = "message-attachments";
+				attached.setAttribute("aria-label", "Message attachments");
+				for (const attachment of message.attachments) {
+					const file = document.createElement("li");
+					file.className = "message-attachment";
+					const icon = document.createElement("span");
+					icon.setAttribute("aria-hidden", "true");
+					icon.textContent = attachment.kind === "image" ? "▣" : "▤";
+					const label = document.createElement("span");
+					label.textContent = `${attachment.name} · ${fileSize(attachment.size)}`;
+					file.append(icon, label);
+					attached.append(file);
+				}
+				item.append(attached);
+			}
 			conversationList.append(item);
 		}
 		requestAnimationFrame(() => {
@@ -969,6 +1075,20 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		scrollConversationToLatest(),
 	);
 
+	function renderPrivacyControl(): void {
+		const permission = activeSession?.permission ?? "read-only";
+		const workspaceWrite = permission === "workspace-write";
+		privacyChip.textContent = workspaceWrite ? "APPROVE FOR ME" : "READ-ONLY";
+		privacyChip.dataset.permission = permission;
+		privacyChip.setAttribute("aria-pressed", String(workspaceWrite));
+		privacyChip.title = workspaceWrite
+			? "Workspace-write is enabled. Activate to return this session to read-only."
+			: "Read-only is enabled. Activate to allow in-scope workspace changes.";
+		privacyChip.disabled = !activeSession || busy;
+		sessionPermission.disabled = !activeSession || busy;
+		attachmentInput.disabled = !activeSession || busy;
+	}
+
 	function renderSessionSettings(): void {
 		if (!activeSession) {
 			return;
@@ -976,6 +1096,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		activeSessionTitle.textContent = activeSession.title;
 		sessionMode.value = activeSession.mode;
 		sessionPermission.value = activeSession.permission;
+		renderPrivacyControl();
 		leadAgentSelect.replaceChildren();
 		sessionTeam.replaceChildren();
 		for (const agent of bootstrap.agents) {
@@ -1014,6 +1135,108 @@ export async function initStudio(context: StudioContext): Promise<void> {
 				: "Read-only session. Chats and memories persist locally.";
 	}
 
+	function clearPendingAttachments(): void {
+		for (const attachment of pendingAttachments) {
+			if (attachment.previewUrl) {
+				URL.revokeObjectURL(attachment.previewUrl);
+			}
+		}
+		pendingAttachments = [];
+		attachmentInput.value = "";
+		renderPendingAttachments();
+	}
+
+	function renderPendingAttachments(): void {
+		attachmentList.replaceChildren();
+		for (const attachment of pendingAttachments) {
+			const item = document.createElement("li");
+			item.className = "attachment-preview";
+			if (attachment.previewUrl) {
+				const preview = document.createElement("img");
+				preview.src = attachment.previewUrl;
+				preview.alt = "";
+				item.append(preview);
+			}
+
+			const label = document.createElement("span");
+			label.textContent = `${attachment.file.name} · ${fileSize(attachment.file.size)}`;
+			const remove = document.createElement("button");
+			remove.type = "button";
+			remove.className = "attachment-remove";
+			remove.dataset.attachmentId = attachment.id;
+			remove.setAttribute("aria-label", `Remove ${attachment.file.name}`);
+			remove.textContent = "×";
+			item.append(label, remove);
+			attachmentList.append(item);
+		}
+	}
+
+	async function attachmentPayloads(): Promise<AttachmentPayload[]> {
+		return Promise.all(
+			pendingAttachments.map(async ({ file }) => ({
+				name: file.name,
+				type: file.type,
+				size: file.size,
+				dataUrl: await readFileAsDataUrl(file),
+			})),
+		);
+	}
+
+	attachmentInput.addEventListener("change", () => {
+		const selectedFiles = Array.from(attachmentInput.files ?? []);
+		for (const file of selectedFiles) {
+			if (pendingAttachments.length >= MAX_ATTACHMENT_COUNT) {
+				context.addActivity(
+					`You can attach up to ${MAX_ATTACHMENT_COUNT} files per message.`,
+					"warning",
+				);
+				break;
+			}
+			if (!isAcceptedAttachment(file)) {
+				context.addActivity(`${file.name} is not a supported attachment.`, "error");
+				continue;
+			}
+			if (file.size > MAX_ATTACHMENT_BYTES) {
+				context.addActivity(`${file.name} exceeds the 2 MB file limit.`, "error");
+				continue;
+			}
+
+			const extension = file.name.split(".").at(-1)?.toLowerCase();
+			const previewUrl = ["png", "jpg", "jpeg", "webp"].includes(
+				extension ?? "",
+			)
+				? URL.createObjectURL(file)
+				: null;
+			pendingAttachments.push({
+				id: crypto.randomUUID(),
+				file,
+				previewUrl,
+			});
+		}
+		attachmentInput.value = "";
+		renderPendingAttachments();
+	});
+
+	attachmentList.addEventListener("click", (event) => {
+		const button = (event.target as Element).closest<HTMLButtonElement>(
+			"[data-attachment-id]",
+		);
+		if (!button?.dataset.attachmentId) {
+			return;
+		}
+		const index = pendingAttachments.findIndex(
+			(attachment) => attachment.id === button.dataset.attachmentId,
+		);
+		if (index < 0) {
+			return;
+		}
+		const [removed] = pendingAttachments.splice(index, 1);
+		if (removed.previewUrl) {
+			URL.revokeObjectURL(removed.previewUrl);
+		}
+		renderPendingAttachments();
+	});
+
 	function renderNoActiveSession(): void {
 		activeSession = null;
 		activeSessionId = null;
@@ -1021,9 +1244,11 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		leadAgentSelect.replaceChildren();
 		sessionTeam.replaceChildren();
 		context.taskPrompt.value = "";
+		clearPendingAttachments();
 		context.taskPrompt.placeholder = "Create a chat, workflow, or ad-hoc chat to begin.";
 		context.taskHint.textContent = "Choose a category above to create a new local session.";
 		context.runTaskButton.disabled = true;
+		renderPrivacyControl();
 		context.resultText.textContent = "No active session.";
 		renderConversation(true);
 		renderTeam();
@@ -1034,6 +1259,9 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		scrollToLatest = false,
 	): Promise<void> {
 		const sessionChanged = sessionId !== activeSessionId;
+		if (sessionChanged) {
+			clearPendingAttachments();
+		}
 		activeSessionId = sessionId;
 		activeSession = await api<SessionDetail>(`/api/sessions/${sessionId}`);
 		activeProjectId = activeSession.projectId;
@@ -1313,14 +1541,44 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		renderTeam();
 	}
 
+	async function setSessionPermission(
+		permission: SessionPermission,
+	): Promise<void> {
+		try {
+			await patchActiveSession({ permission });
+			context.addActivity(
+				permission === "workspace-write"
+					? "Approve for me enabled for this session."
+					: "Session returned to read-only mode.",
+				"permission",
+			);
+		} catch (error) {
+			renderSessionSettings();
+			context.addActivity(
+				error instanceof Error
+					? error.message
+					: "Could not update session access",
+				"error",
+			);
+		}
+	}
+
 	sessionMode.addEventListener("change", () =>
 		void patchActiveSession({ mode: sessionMode.value as SessionMode }),
 	);
 	sessionPermission.addEventListener("change", () =>
-		void patchActiveSession({
-			permission: sessionPermission.value as SessionPermission,
-		}),
+		void setSessionPermission(sessionPermission.value as SessionPermission),
 	);
+	privacyChip.addEventListener("click", () => {
+		if (!activeSession || busy) {
+			return;
+		}
+		void setSessionPermission(
+			activeSession.permission === "read-only"
+				? "workspace-write"
+				: "read-only",
+		);
+	});
 	leadAgentSelect.addEventListener("change", () =>
 		void patchActiveSession({ leadAgentId: leadAgentSelect.value }),
 	);
@@ -1477,6 +1735,8 @@ export async function initStudio(context: StudioContext): Promise<void> {
 
 		busy = true;
 		context.runTaskButton.disabled = true;
+		attachmentInput.disabled = true;
+		renderPrivacyControl();
 		scrollConversationToLatest();
 		const endpoint =
 			activeSession.mode === "workflow"
@@ -1490,6 +1750,7 @@ export async function initStudio(context: StudioContext): Promise<void> {
 		);
 
 		try {
+			const attachments = await attachmentPayloads();
 			await api(endpoint, {
 				method: "POST",
 				body: JSON.stringify({
@@ -1498,13 +1759,17 @@ export async function initStudio(context: StudioContext): Promise<void> {
 					permission: activeSession.permission,
 					leadAgentId: activeSession.leadAgentId,
 					agentIds: activeSession.agentIds,
+					attachments,
 				}),
 			});
 			context.taskPrompt.value = "";
+			clearPendingAttachments();
 			await loadSession(activeSessionId, true);
 		} catch (error) {
 			busy = false;
 			context.runTaskButton.disabled = false;
+			attachmentInput.disabled = false;
+			renderPrivacyControl();
 			context.addActivity(
 				error instanceof Error ? error.message : "Could not dispatch task",
 				"error",
@@ -1548,12 +1813,19 @@ export async function initStudio(context: StudioContext): Promise<void> {
 			if (action === "completed" || action === "failed") {
 				busy = false;
 				context.runTaskButton.disabled = false;
+				attachmentInput.disabled = false;
+				renderPrivacyControl();
 				void reloadBootstrap();
 			}
 		}
-		if (event.type === "activity" && event.status === "idle") {
+		if (
+			event.type === "activity" &&
+			(event.status === "idle" || event.status === "waiting")
+		) {
 			busy = false;
 			context.runTaskButton.disabled = false;
+			attachmentInput.disabled = false;
+			renderPrivacyControl();
 		}
 	}
 

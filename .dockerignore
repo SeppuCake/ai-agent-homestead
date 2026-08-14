@@ -1,0 +1,17 @@
+.git
+.github
+.vscode
+.agent-homestead
+.env
+.env.*
+!.env.example
+dist
+node_modules
+logs
+*.log
+*.local
+*.code-workspace
+Dockerfile*
+compose*.yaml
+compose*.yml
+README.md

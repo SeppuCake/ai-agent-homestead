@@ -1,0 +1,46 @@
+name: agent-homestead
+
+services:
+  homestead:
+    image: agent-homestead:local
+    build:
+      context: .
+      target: runtime
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${HOMESTEAD_PORT:-4174}:4174"
+    environment:
+      HOMESTEAD_HOST: 0.0.0.0
+      HOMESTEAD_DATA_DIR: /data
+      NODE_ENV: production
+      PORT: 4174
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - homestead-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4174/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 5s
+
+volumes:
+  homestead-data:
+    name: agent-homestead-data

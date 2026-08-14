@@ -2,6 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AttachmentService } from "./attachment-service.mjs";
 import { CodexBridge } from "./codex-bridge.mjs";
 import { HomesteadStore } from "./homestead-store.mjs";
 
@@ -9,10 +10,14 @@ const rootDirectory = dirname(fileURLToPath(import.meta.url));
 const distDirectory = join(rootDirectory, "dist");
 const host = process.env.HOMESTEAD_HOST ?? "127.0.0.1";
 const port = Number.parseInt(process.env.PORT ?? "4174", 10);
-const MAX_BODY_BYTES = 256 * 1024;
+const dataDirectory = resolve(
+	process.env.HOMESTEAD_DATA_DIR ?? join(rootDirectory, ".agent-homestead"),
+);
+const MAX_BODY_BYTES = 12 * 1024 * 1024;
 const MAX_PROMPT_LENGTH = 4000;
 const clients = new Set();
-const store = new HomesteadStore(rootDirectory);
+const store = new HomesteadStore(rootDirectory, dataDirectory);
+const attachments = new AttachmentService(dataDirectory);
 await store.initialize();
 
 let bridgeMode = "connecting";
@@ -157,7 +162,12 @@ function clipped(value) {
 	return String(value ?? "").slice(0, 12_000);
 }
 
-async function executeChat(sessionId, prompt, requestedAgentId) {
+async function executeChat(
+	sessionId,
+	prompt,
+	requestedAgentId,
+	attachedFiles = [],
+) {
 	const session = requireSession(sessionId);
 	const agent = resolveSessionAgent(session, requestedAgentId);
 	const project = store.getProject(session.projectId);
@@ -169,6 +179,7 @@ async function executeChat(sessionId, prompt, requestedAgentId) {
 		role: "user",
 		text: prompt,
 		kind: "chat",
+		attachments: attachedFiles,
 	});
 	broadcast({ type: "session-message", sessionId: session.id, message: userMessage });
 
@@ -180,6 +191,7 @@ async function executeChat(sessionId, prompt, requestedAgentId) {
 			prompt,
 			permission: session.permission,
 			stage: "chat",
+			attachments: attachedFiles,
 		});
 		const message = await store.addMessage(session.id, {
 			role: "assistant",
@@ -223,7 +235,7 @@ function findStageAgent(agents, role, fallbackIndex, leadAgent) {
 	);
 }
 
-async function runWorkflow(sessionId, prompt) {
+async function runWorkflow(sessionId, prompt, attachedFiles = []) {
 	const session = requireSession(sessionId);
 	const project = store.getProject(session.projectId);
 	const agents = session.agentIds
@@ -248,6 +260,7 @@ async function runWorkflow(sessionId, prompt) {
 		text: prompt,
 		kind: "workflow",
 		stage: "brief",
+		attachments: attachedFiles,
 	});
 	broadcast({ type: "session-message", sessionId: session.id, message: userMessage });
 	broadcast({
@@ -342,6 +355,7 @@ async function runWorkflow(sessionId, prompt) {
 				prompt: stage.prompt(),
 				permission: stage.permission,
 				stage: stage.name,
+				attachments: attachedFiles,
 			});
 			outputs[stage.name] = result;
 			const message = await store.addMessage(session.id, {
@@ -605,6 +619,9 @@ const server = createServer(async (request, response) => {
 				throw new Error("Session is currently running and cannot be deleted");
 			}
 			const result = await store.deleteSession(sessionMatch[0]);
+			await attachments.deleteSession(sessionMatch[0]).catch((error) => {
+				log(`Could not remove session attachments: ${error.message}`, "warning");
+			});
 			broadcast({
 				type: "sessions-changed",
 				deletedSessionId: sessionMatch[0],
@@ -628,7 +645,11 @@ const server = createServer(async (request, response) => {
 			if (payload?.permission || payload?.agentIds || payload?.leadAgentId) {
 				await store.updateSession(session.id, payload);
 			}
-			void executeChat(session.id, prompt, payload?.agentId);
+			const attachedFiles = await attachments.save(
+				session.id,
+				payload?.attachments,
+			);
+			void executeChat(session.id, prompt, payload?.agentId, attachedFiles);
 			writeJson(response, 202, { accepted: true, sessionId: session.id });
 			return;
 		}
@@ -647,7 +668,11 @@ const server = createServer(async (request, response) => {
 			if (payload?.permission || payload?.agentIds || payload?.leadAgentId) {
 				await store.updateSession(session.id, payload);
 			}
-			void runWorkflow(session.id, prompt);
+			const attachedFiles = await attachments.save(
+				session.id,
+				payload?.attachments,
+			);
+			void runWorkflow(session.id, prompt, attachedFiles);
 			writeJson(response, 202, { accepted: true, sessionId: session.id });
 			return;
 		}
@@ -686,7 +711,16 @@ const server = createServer(async (request, response) => {
 			if (!fallbackSessionId) {
 				throw new Error("Session not found");
 			}
-			void executeChat(fallbackSessionId, prompt, payload?.agentId);
+			const attachedFiles = await attachments.save(
+				fallbackSessionId,
+				payload?.attachments,
+			);
+			void executeChat(
+				fallbackSessionId,
+				prompt,
+				payload?.agentId,
+				attachedFiles,
+			);
 			writeJson(response, 202, {
 				accepted: true,
 				sessionId: fallbackSessionId,
@@ -709,7 +743,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, host, () => {
 	console.log(`Agent Homestead Studio: http://${host}:${port}`);
-	console.log("Storage: local .agent-homestead/state.json");
+	console.log(`Storage: ${store.filePath}`);
 	console.log("Codex: persistent threads with explicit workspace permissions");
 	bridge.start();
 });

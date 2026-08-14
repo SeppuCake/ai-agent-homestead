@@ -130,6 +130,75 @@ app.innerHTML = `
     </header>
 
     <main class="dashboard">
+      <aside class="control-panel panel" aria-labelledby="control-title">
+        <div class="panel-heading compact">
+          <div>
+            <p class="eyebrow">CODEX BRIDGE</p>
+            <h2 id="control-title">Give Mosin a task</h2>
+          </div>
+          <button
+            id="privacy-chip"
+            class="privacy-chip"
+            type="button"
+            aria-pressed="false"
+            title="Switch this session between read-only and workspace-write access"
+          >READ-ONLY</button>
+        </div>
+
+        <form id="task-form" class="task-form">
+          <label for="task-prompt">Prompt</label>
+          <textarea
+            id="task-prompt"
+            maxlength="4000"
+            rows="7"
+            placeholder="Describe what you want your Homestead agents to inspect, plan, build, or explain."
+          ></textarea>
+          <div class="attachment-composer">
+            <label class="attachment-button" for="task-attachments">
+              + Attach context
+            </label>
+            <input
+              id="task-attachments"
+              class="visually-hidden"
+              type="file"
+              multiple
+              accept="image/png,image/jpeg,image/webp,application/pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.css,.html,.xml,.yaml,.yml"
+            />
+            <span>Up to 4 files · 2 MB each</span>
+          </div>
+          <ul id="attachment-list" class="attachment-list" aria-live="polite"></ul>
+          <div class="task-actions">
+            <button id="run-task" class="primary-button" type="submit">
+              Send to Codex
+            </button>
+            <button id="run-demo" class="secondary-button" type="button">
+              Run demo
+            </button>
+          </div>
+          <p id="task-hint" class="task-hint">
+            The local bridge inherits your Codex login. No key is stored in the browser.
+          </p>
+        </form>
+
+        <div class="bridge-feedback-grid">
+          <section class="result-card" aria-labelledby="result-title">
+            <div class="section-title-row">
+              <h3 id="result-title">Latest result</h3>
+              <button id="clear-result" class="text-button" type="button">Clear</button>
+            </div>
+            <p id="result-text">No completed Codex task yet.</p>
+          </section>
+
+          <section class="activity-card" aria-labelledby="activity-title">
+            <div class="section-title-row">
+              <h3 id="activity-title">Activity feed</h3>
+              <span id="event-count">0 events</span>
+            </div>
+            <ol id="activity-feed" class="activity-feed" aria-live="polite"></ol>
+          </section>
+        </div>
+      </aside>
+
       <section class="world-panel panel" aria-labelledby="world-title">
         <div class="panel-heading">
           <div>
@@ -163,52 +232,7 @@ app.innerHTML = `
         </div>
       </section>
 
-      <aside class="control-panel panel" aria-labelledby="control-title">
-        <div class="panel-heading compact">
-          <div>
-            <p class="eyebrow">CODEX BRIDGE</p>
-            <h2 id="control-title">Give Mosin a task</h2>
-          </div>
-          <span class="privacy-chip">READ-ONLY</span>
-        </div>
-
-        <form id="task-form" class="task-form">
-          <label for="task-prompt">Local Codex task</label>
-          <textarea
-            id="task-prompt"
-            maxlength="4000"
-            rows="4"
-            placeholder="Inspect this repository and suggest the single best next improvement."
-          ></textarea>
-          <div class="task-actions">
-            <button id="run-task" class="primary-button" type="submit">
-              Send to Codex
-            </button>
-            <button id="run-demo" class="secondary-button" type="button">
-              Run demo
-            </button>
-          </div>
-          <p id="task-hint" class="task-hint">
-            The local bridge inherits your Codex login. No key is stored in the browser.
-          </p>
-        </form>
-
-        <section class="result-card" aria-labelledby="result-title">
-          <div class="section-title-row">
-            <h3 id="result-title">Latest result</h3>
-            <button id="clear-result" class="text-button" type="button">Clear</button>
-          </div>
-          <p id="result-text">No completed Codex task yet.</p>
-        </section>
-
-        <section class="activity-card" aria-labelledby="activity-title">
-          <div class="section-title-row">
-            <h3 id="activity-title">Activity feed</h3>
-            <span id="event-count">0 events</span>
-          </div>
-          <ol id="activity-feed" class="activity-feed" aria-live="polite"></ol>
-        </section>
-      </aside>
+      <div id="conversation-slot" class="conversation-slot"></div>
     </main>
 
     <footer class="footer">

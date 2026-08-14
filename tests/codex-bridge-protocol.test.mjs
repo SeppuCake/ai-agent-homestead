@@ -2,11 +2,44 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+	buildApiTurnInput,
+	buildLocalTurnInput,
 	CodexBridge,
 	resolveCodexExecutable,
 } from "../codex-bridge.mjs";
 
 const projectPath = "D:\\Projects\\ai-agent-homestead";
+
+test("attachment helpers use each provider's supported input shape", () => {
+	const attachments = [
+		{
+			name: "room.png",
+			type: "image/png",
+			size: 12,
+			kind: "image",
+			path: "D:\\data\\room.png",
+			dataUrl: "data:image/png;base64,YWJj",
+		},
+		{
+			name: "notes.md",
+			type: "text/markdown",
+			size: 24,
+			kind: "file",
+			path: "D:\\data\\notes.md",
+			dataUrl: "data:text/markdown;base64,YWJj",
+		},
+	];
+
+	const local = buildLocalTurnInput("Explain these files", attachments);
+	assert.equal(local[1].type, "localImage");
+	assert.equal(local[1].path, "D:\\data\\room.png");
+	assert.match(local[0].text, /notes\.md/);
+
+	const api = buildApiTurnInput("Explain these files", attachments);
+	assert.equal(api[0].content[1].type, "input_image");
+	assert.equal(api[0].content[2].type, "input_file");
+	assert.equal(api[0].content[2].filename, "notes.md");
+});
 
 test("Windows runtime discovery skips a CLI with no sibling Code Mode host", () => {
 	const legacyCli = "C:\\legacy\\codex.exe";

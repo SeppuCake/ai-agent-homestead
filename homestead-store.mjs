@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-const STORE_VERSION = 3;
+const STORE_VERSION = 4;
 const now = () => new Date().toISOString();
 
 function sessionMode(value) {
@@ -104,6 +104,16 @@ function publicAgent(agent) {
 	};
 }
 
+function publicAttachment(attachment) {
+	return {
+		id: clampText(attachment?.id, 80),
+		name: clampText(attachment?.name, 120, "attachment"),
+		type: clampText(attachment?.type, 100),
+		size: Math.max(0, Number(attachment?.size) || 0),
+		kind: attachment?.kind === "image" ? "image" : "file",
+	};
+}
+
 function publicSession(session, includeMessages = false) {
 	const output = {
 		id: session.id,
@@ -128,9 +138,12 @@ function publicSession(session, includeMessages = false) {
 }
 
 export class HomesteadStore {
-	constructor(rootDirectory) {
+	constructor(
+		rootDirectory,
+		dataDirectory = join(rootDirectory, ".agent-homestead"),
+	) {
 		this.rootDirectory = rootDirectory;
-		this.dataDirectory = join(rootDirectory, ".agent-homestead");
+		this.dataDirectory = dataDirectory;
 		this.filePath = join(this.dataDirectory, "state.json");
 		this.state = createDefaultState(rootDirectory);
 		this.persistChain = Promise.resolve();
@@ -188,6 +201,11 @@ export class HomesteadStore {
 					? "workspace-write"
 					: "read-only";
 			session.mode = sessionMode(session.mode);
+			for (const message of session.messages) {
+				message.attachments = Array.isArray(message.attachments)
+					? message.attachments.map(publicAttachment)
+					: [];
+			}
 		}
 
 		if (!projectIds.has(this.state.settings?.activeProjectId)) {
@@ -381,6 +399,9 @@ export class HomesteadStore {
 			text: clampText(message.text, 40_000),
 			kind: clampText(message.kind, 32, "chat"),
 			stage: clampText(message.stage, 32),
+			attachments: Array.isArray(message.attachments)
+				? message.attachments.map(publicAttachment)
+				: [],
 			createdAt: now(),
 		};
 		session.messages.push(record);

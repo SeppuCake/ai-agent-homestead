@@ -8,7 +8,7 @@
     "dev:ui": "vite",
     "bridge": "node server.mjs",
     "build": "tsc && vite build",
-    "test": "node --test tests/codex-bridge-protocol.test.mjs",
+    "test": "node --test tests/attachment-service.test.mjs tests/codex-bridge-protocol.test.mjs tests/homestead-store.test.mjs",
     "start": "npm run build && node server.mjs",
     "preview": "vite preview"
   },
